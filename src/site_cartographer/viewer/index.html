@@ -76,8 +76,25 @@
   #layout-progress .bar { height: 100%; background: #6ab0ff; width: 0%; transition: width 80ms linear; }
 
   #panel { display: flex; flex-direction: column; border-left: 1px solid #333; background: #1a1a1a; color: #eee; }
-  #panel-header { padding: 8px 12px; background: #222; border-bottom: 1px solid #333; font-size: 13px; }
+  #panel-header {
+    padding: 8px 12px; background: #222; border-bottom: 1px solid #333; font-size: 13px;
+    display: flex; align-items: center; gap: 10px;
+  }
   #panel-header a { color: #6ab0ff; text-decoration: none; word-break: break-all; }
+  #panel-header .home-btn {
+    flex: 0 0 auto;
+    color: #999;
+    text-decoration: none;
+    padding: 2px 9px;
+    border: 1px solid #3a3a3a;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1.4;
+    background: #1a1a1a;
+    transition: border-color 100ms, color 100ms;
+  }
+  #panel-header .home-btn:hover { color: #6ab0ff; border-color: #6ab0ff; text-decoration: none; }
+  #panel-header #panel-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #panel-tabs { display: flex; background: #181818; border-bottom: 1px solid #333; }
   #panel-tabs .tab {
     flex: 1; padding: 8px 12px; background: transparent; color: #888;
@@ -208,7 +225,10 @@
   <div id="divider" title="drag to resize"></div>
 
   <div id="panel">
-    <div id="panel-header"><span id="panel-title">site-cartographer</span></div>
+    <div id="panel-header">
+      <a class="home-btn" href="/" title="back to home menu">← home</a>
+      <span id="panel-title">site-cartographer</span>
+    </div>
     <div id="panel-tabs">
       <button class="tab active" data-tab="page">page</button>
       <button class="tab" data-tab="metadata">metadata</button>
