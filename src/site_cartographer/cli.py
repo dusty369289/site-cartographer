@@ -40,7 +40,10 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-depth", type=int, default=15)
     p.add_argument("--max-file-size", type=parse_size, default=None,
                    help="halt when archive exceeds this size, e.g. 500MB or 2GB")
-    p.add_argument("--delay-ms", type=int, default=250)
+    p.add_argument("--workers", type=int, default=1,
+                   help="parallel discovery workers (1-8, default 1 = sequential)")
+    p.add_argument("--delay-ms", type=int, default=250,
+                   help="per-worker politeness delay between fetches")
     p.add_argument("--page-timeout-ms", type=int, default=30000)
     p.add_argument(
         "--include-subdomains", action="store_true",
@@ -146,6 +149,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         max_file_size=args.max_file_size,
         delay_ms=args.delay_ms,
         page_timeout_ms=args.page_timeout_ms,
+        parallel_workers=args.workers,
         include_subdomains=args.include_subdomains,
         respect_robots=args.respect_robots,
         external_policy=args.external_policy,

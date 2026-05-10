@@ -20,7 +20,7 @@ from rich.text import Text
 
 from . import __version__
 from .archive import RunSummary, format_size, list_runs, parse_size
-from .crawler import CrawlConfig, crawl
+from .crawler import MAX_WORKERS, CrawlConfig, crawl
 from .graph import export_cytoscape_json
 from .progress import RichProgressReporter
 from .serve import serve
@@ -175,7 +175,17 @@ def _interactive_scan(output_root: Path) -> None:
             "max archive size (e.g. 500MB, 2GB; blank = unlimited):",
             default="", style=s,
         ),
-        delay_ms=questionary.text("delay between requests (ms):", default="250", style=s),
+        workers=questionary.text(
+            f"parallel workers (1 = sequential, max {MAX_WORKERS}):",
+            default="1",
+            validate=lambda v: (v.isdigit() and 1 <= int(v) <= MAX_WORKERS)
+            or f"must be a number between 1 and {MAX_WORKERS}",
+            style=s,
+        ),
+        delay_ms=questionary.text(
+            "per-worker delay between fetches (ms):",
+            default="250", style=s,
+        ),
         include_subdomains=questionary.confirm(
             "also follow links to subdomains"
             " (e.g. blog.foo.com when starting at foo.com)?"
@@ -221,6 +231,7 @@ def _interactive_scan(output_root: Path) -> None:
         max_depth=int(answers["max_depth"]),
         max_file_size=max_size,
         delay_ms=int(answers["delay_ms"]),
+        parallel_workers=int(answers["workers"]),
         include_subdomains=answers["include_subdomains"],
         respect_robots=answers["respect_robots"],
         external_policy=answers["external_policy"],
@@ -290,6 +301,7 @@ def _interactive_resume(output_root: Path) -> None:
     cur_max_pages = int(existing.get("max_pages") or 100)
     cur_max_depth = int(existing.get("max_depth") or 15)
     cur_max_size = existing.get("max_file_size")
+    cur_workers = int(existing.get("parallel_workers") or 1)
     cur_size_str = format_size(cur_max_size) if cur_max_size else ""
 
     suggested_pages = cur_max_pages + max(50, cur_max_pages)
@@ -307,6 +319,13 @@ def _interactive_resume(output_root: Path) -> None:
         max_size=questionary.text(
             f"max archive size (was {cur_size_str or 'unlimited'}; blank = unlimited):",
             default=cur_size_str, style=s,
+        ),
+        workers=questionary.text(
+            f"parallel workers (was {cur_workers}, max {MAX_WORKERS}):",
+            default=str(cur_workers),
+            validate=lambda v: (v.isdigit() and 1 <= int(v) <= MAX_WORKERS)
+            or f"must be a number between 1 and {MAX_WORKERS}",
+            style=s,
         ),
     ).ask()
     if answers is None:
@@ -327,6 +346,7 @@ def _interactive_resume(output_root: Path) -> None:
         max_file_size=new_size,
         delay_ms=int(existing.get("delay_ms") or 250),
         page_timeout_ms=int(existing.get("page_timeout_ms") or 30000),
+        parallel_workers=int(answers["workers"]),
         include_subdomains=bool(existing.get("include_subdomains")),
         respect_robots=bool(existing.get("respect_robots")),
         external_policy=existing.get("external_policy") or "metadata",

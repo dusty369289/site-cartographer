@@ -38,11 +38,13 @@ class RichProgressReporter(ProgressReporter):
         self.run_id = 0
         self.max_pages = 0
         self.max_size: int | None = None
+        self.workers = 1
         self.current_url = ""
         self.archived_count = 0
         self.discovered = 0
         self.queue_size = 0
         self.archived_bytes = 0
+        self.in_flight = 0
         self.halt_msg = ""
 
         self._progress = Progress(
@@ -69,7 +71,14 @@ class RichProgressReporter(ProgressReporter):
             self._live.update(self._render())
 
     def _render(self):
-        title = f"[bold cyan]site-cartographer[/bold cyan]   [white]{self.start_url}[/white]"
+        worker_label = (
+            f"[dim]· {self.workers} workers ({self.in_flight} active)[/dim] "
+            if self.workers > 1 else ""
+        )
+        title = (
+            f"[bold cyan]site-cartographer[/bold cyan] {worker_label}"
+            f"[white]{self.start_url}[/white]"
+        )
 
         stats = Table.grid(padding=(0, 2), expand=True)
         stats.add_column(justify="left")
@@ -107,21 +116,23 @@ class RichProgressReporter(ProgressReporter):
 
     # ProgressReporter hooks ------------------------------------------------
 
-    def on_start(self, *, run_id, start_url, max_pages, max_size) -> None:
+    def on_start(self, *, run_id, start_url, max_pages, max_size, workers=1) -> None:
         self.run_id = run_id
         self.start_url = start_url
         self.max_pages = max_pages
         self.max_size = max_size
+        self.workers = workers
         self._task_id = self._progress.add_task("crawl", total=max_pages)
         self._refresh()
 
     def on_page(self, *, idx, depth, url, status, title, archived_bytes,
-                queue_size, archived_count, discovered, kind) -> None:
+                queue_size, archived_count, discovered, kind, in_flight=0) -> None:
         self.current_url = url
         self.archived_count = archived_count
         self.discovered = discovered
         self.queue_size = queue_size
         self.archived_bytes = archived_bytes
+        self.in_flight = in_flight
         if self._task_id is not None:
             self._progress.update(self._task_id, completed=archived_count)
         glyph, _ = _KIND_GLYPH.get(kind, (f"[white]{kind}[/white]", ""))

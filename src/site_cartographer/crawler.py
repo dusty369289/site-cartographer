@@ -19,12 +19,13 @@ class ProgressReporter:
     """Hook for UI layers to observe crawl events. The default impl is silent."""
 
     def on_start(self, *, run_id: int, start_url: str, max_pages: int,
-                 max_size: int | None) -> None:
+                 max_size: int | None, workers: int = 1) -> None:
         pass
 
     def on_page(self, *, idx: int, depth: int, url: str, status: int | None,
                 title: str, archived_bytes: int, queue_size: int,
-                archived_count: int, discovered: int, kind: str) -> None:
+                archived_count: int, discovered: int, kind: str,
+                in_flight: int = 0) -> None:
         """kind in {'archived', 'phantom', 'duplicate', 'external', 'error'}"""
         pass
 
@@ -34,6 +35,14 @@ class ProgressReporter:
     def on_finish(self, *, archived_count: int, total_pages: int,
                   edges: int) -> None:
         pass
+
+
+@dataclass
+class _CrawlState:
+    """Shared coordination state between worker tasks."""
+    halt_reason: str | None = None
+    stop: bool = False
+    in_flight: int = 0  # workers currently mid-fetch (post-claim, pre-finish)
 
 
 SCHEMA_SQL = """
@@ -89,12 +98,16 @@ CREATE TABLE IF NOT EXISTS pending (
   depth INTEGER NOT NULL,
   parent_page_id INTEGER,
   enqueued_at TEXT NOT NULL,
+  claimed_at TEXT,
   UNIQUE(run_id, url_canonical)
 );
 """
 
 
 EXTERNAL_POLICIES = ("ignore", "metadata", "archive", "crawl")
+
+
+MAX_WORKERS = 8
 
 
 @dataclass
@@ -107,6 +120,7 @@ class CrawlConfig:
     max_file_size: int | None = None  # bytes; None = unlimited
     delay_ms: int = 250
     page_timeout_ms: int = 30000
+    parallel_workers: int = 1
     include_subdomains: bool = False
     respect_robots: bool = False
     external_policy: str = "metadata"
@@ -120,6 +134,11 @@ class CrawlConfig:
             raise ValueError(
                 f"external_policy must be one of {EXTERNAL_POLICIES},"
                 f" got {self.external_policy!r}"
+            )
+        if not 1 <= self.parallel_workers <= MAX_WORKERS:
+            raise ValueError(
+                f"parallel_workers must be between 1 and {MAX_WORKERS},"
+                f" got {self.parallel_workers}"
             )
 
     def to_json_dict(self) -> dict:
@@ -137,14 +156,15 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.executescript(SCHEMA_SQL)
     _migrate(conn)
     return conn
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Backfill columns that were added after the initial schema. SQLite
-    only supports ADD COLUMN, which is enough for our additive changes."""
+    """Backfill columns added after the initial schema. SQLite only supports
+    ADD COLUMN, which is enough for our additive changes."""
     runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
     for col in ("name TEXT", "halt_reason TEXT"):
         col_name = col.split()[0]
@@ -155,6 +175,30 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE pages ADD COLUMN is_fetch_candidate INTEGER NOT NULL DEFAULT 0"
         )
+    if "archive_in_progress" not in pages_cols:
+        conn.execute(
+            "ALTER TABLE pages ADD COLUMN archive_in_progress INTEGER NOT NULL DEFAULT 0"
+        )
+    pending_cols = {r[1] for r in conn.execute("PRAGMA table_info(pending)").fetchall()}
+    if "claimed_at" not in pending_cols:
+        conn.execute("ALTER TABLE pending ADD COLUMN claimed_at TEXT")
+    conn.commit()
+
+
+def _reset_in_flight(conn: sqlite3.Connection, run_id: int) -> None:
+    """Clear stale in-flight markers from a previous worker that didn't get
+    to clean up (e.g. interrupted mid-fetch). Called on resume to make every
+    pending/external row eligible for re-claiming."""
+    conn.execute(
+        "UPDATE pending SET claimed_at = NULL"
+        " WHERE run_id = ? AND claimed_at IS NOT NULL",
+        (run_id,),
+    )
+    conn.execute(
+        "UPDATE pages SET archive_in_progress = 0"
+        " WHERE run_id = ? AND archive_in_progress = 1",
+        (run_id,),
+    )
     conn.commit()
 
 
@@ -177,6 +221,7 @@ def start_run(conn: sqlite3.Connection, config: CrawlConfig) -> int:
                     (row["id"],),
                 )
                 conn.commit()
+            _reset_in_flight(conn, row["id"])
             logger.info("resuming run %s", row["id"])
             return row["id"]
     cursor = conn.execute(
@@ -230,6 +275,7 @@ async def crawl(config: CrawlConfig,
         progress.on_start(
             run_id=run_id, start_url=config.start_url,
             max_pages=config.max_pages, max_size=config.max_file_size,
+            workers=config.parallel_workers,
         )
         try:
             async with BrowserSession(
@@ -263,6 +309,24 @@ async def crawl(config: CrawlConfig,
     return layout["root"]
 
 
+def _claim_external(conn: sqlite3.Connection, run_id: int):
+    """Atomic claim for an external page in the externals pass."""
+    row = conn.execute(
+        "SELECT id, url_canonical, depth FROM pages"
+        " WHERE run_id = ? AND is_external = 1 AND is_fetch_candidate = 1"
+        " AND archive_path IS NULL AND archive_in_progress = 0"
+        " ORDER BY id ASC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE pages SET archive_in_progress = 1 WHERE id = ?", (row["id"],)
+    )
+    conn.commit()
+    return row
+
+
 async def _externals_pass(
     conn: sqlite3.Connection,
     run_id: int,
@@ -276,33 +340,74 @@ async def _externals_pass(
     Honours max_file_size but not max_pages — externals are bounded by size.
     For 'crawl' policy, also extracts links from the external page (one hop
     only); newly-discovered destinations become metadata-only nodes.
+    Runs config.parallel_workers concurrent fetches.
     """
-    while True:
+    state = _CrawlState()
+    workers = [
+        asyncio.create_task(_external_worker(
+            i, state, conn, run_id, browser, config, start_canonical, progress,
+        ))
+        for i in range(config.parallel_workers)
+    ]
+    try:
+        await asyncio.gather(*workers)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        state.stop = True
+        for w in workers:
+            if not w.done():
+                w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+    return state.halt_reason
+
+
+async def _external_worker(
+    worker_id: int,
+    state: _CrawlState,
+    conn: sqlite3.Connection,
+    run_id: int,
+    browser: BrowserSession,
+    config: CrawlConfig,
+    start_canonical: str,
+    progress: ProgressReporter,
+) -> None:
+    while not state.stop:
         if config.max_file_size is not None:
             size = dir_size(config.output_dir)
             if size >= config.max_file_size:
-                reason = (f"reached max-file-size during externals pass "
-                          f"({size}B >= {config.max_file_size}B)")
-                logger.info(reason)
-                progress.on_halt(reason)
-                return reason
+                if state.halt_reason is None:
+                    state.halt_reason = (
+                        f"reached max-file-size during externals pass "
+                        f"({size}B >= {config.max_file_size}B)"
+                    )
+                    logger.info(state.halt_reason)
+                    progress.on_halt(state.halt_reason)
+                state.stop = True
+                return
 
-        row = conn.execute(
-            "SELECT id, url_canonical, depth FROM pages"
-            " WHERE run_id = ? AND is_external = 1 AND is_fetch_candidate = 1"
-            " AND archive_path IS NULL"
-            " ORDER BY id ASC LIMIT 1",
-            (run_id,),
-        ).fetchone()
-        if row is None:
-            return None
+        claimed = _claim_external(conn, run_id)
+        if claimed is None:
+            if state.in_flight == 0:
+                state.stop = True
+                return
+            await asyncio.sleep(0.1)
+            continue
 
-        page_id = row["id"]
-        url = row["url_canonical"]
-        depth = row["depth"]
+        page_id = claimed["id"]
+        url = claimed["url_canonical"]
+        depth = claimed["depth"]
 
-        logger.info("[ext] %s", url)
-        await _fetch_external(conn, run_id, browser, config, page_id, url, depth)
+        state.in_flight += 1
+        try:
+            logger.info("[ext-w%d] %s", worker_id, url)
+            await _fetch_external(conn, run_id, browser, config, page_id, url, depth)
+        finally:
+            conn.execute(
+                "UPDATE pages SET archive_in_progress = 0 WHERE id = ?",
+                (page_id,),
+            )
+            conn.commit()
+            state.in_flight -= 1
 
         archived_count = conn.execute(
             "SELECT COUNT(*) FROM pages WHERE run_id = ? AND archive_path IS NOT NULL",
@@ -313,24 +418,24 @@ async def _externals_pass(
         ).fetchone()[0]
         queue_size = conn.execute(
             "SELECT COUNT(*) FROM pages WHERE run_id = ? AND is_external = 1"
-            " AND is_fetch_candidate = 1 AND archive_path IS NULL",
+            " AND is_fetch_candidate = 1 AND archive_path IS NULL"
+            " AND archive_in_progress = 0",
             (run_id,),
         ).fetchone()[0]
-        title_row = conn.execute(
-            "SELECT title FROM pages WHERE id = ?", (page_id,),
+        meta_row = conn.execute(
+            "SELECT title, http_status FROM pages WHERE id = ?", (page_id,),
         ).fetchone()
 
         progress.on_page(
             idx=archived_count, depth=depth, url=url,
-            status=conn.execute(
-                "SELECT http_status FROM pages WHERE id = ?", (page_id,)
-            ).fetchone()[0],
-            title=title_row["title"] if title_row else "",
+            status=meta_row["http_status"] if meta_row else None,
+            title=meta_row["title"] if meta_row else "",
             archived_bytes=dir_size(config.output_dir),
             queue_size=queue_size,
             archived_count=archived_count,
             discovered=discovered,
             kind="archived",
+            in_flight=state.in_flight,
         )
 
         await asyncio.sleep(config.delay_ms / 1000)
@@ -430,6 +535,26 @@ def _finalise_with_progress(
     progress.on_finish(archived_count=archived, total_pages=total, edges=edges)
 
 
+def _claim_pending(conn: sqlite3.Connection, run_id: int):
+    """Atomically pop the next un-claimed pending row. Synchronous — runs
+    to completion without yielding, so concurrent asyncio workers each get
+    a unique row."""
+    row = conn.execute(
+        "SELECT id, url_canonical, depth FROM pending"
+        " WHERE run_id = ? AND claimed_at IS NULL"
+        " ORDER BY id ASC LIMIT 1",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    conn.execute(
+        "UPDATE pending SET claimed_at = ? WHERE id = ?",
+        (_now(), row["id"]),
+    )
+    conn.commit()
+    return row
+
+
 async def _crawl_loop(
     conn: sqlite3.Connection,
     run_id: int,
@@ -438,41 +563,79 @@ async def _crawl_loop(
     start_canonical: str,
     progress: ProgressReporter,
 ) -> str | None:
-    while True:
+    state = _CrawlState()
+    workers = [
+        asyncio.create_task(_bfs_worker(
+            i, state, conn, run_id, browser, config, start_canonical, progress,
+        ))
+        for i in range(config.parallel_workers)
+    ]
+    try:
+        await asyncio.gather(*workers)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        state.stop = True
+        for w in workers:
+            if not w.done():
+                w.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+    return state.halt_reason
+
+
+async def _bfs_worker(
+    worker_id: int,
+    state: _CrawlState,
+    conn: sqlite3.Connection,
+    run_id: int,
+    browser: BrowserSession,
+    config: CrawlConfig,
+    start_canonical: str,
+    progress: ProgressReporter,
+) -> None:
+    while not state.stop:
         pages_done = conn.execute(
-            "SELECT COUNT(*) AS n FROM pages WHERE run_id = ?"
+            "SELECT COUNT(*) FROM pages WHERE run_id = ?"
             " AND is_external = 0 AND is_phantom_404 = 0",
             (run_id,),
-        ).fetchone()["n"]
+        ).fetchone()[0]
         if pages_done >= config.max_pages:
-            reason = f"reached max-pages cap ({config.max_pages})"
-            logger.info(reason)
-            progress.on_halt(reason)
-            return reason
+            if state.halt_reason is None:
+                state.halt_reason = f"reached max-pages cap ({config.max_pages})"
+                logger.info(state.halt_reason)
+                progress.on_halt(state.halt_reason)
+            state.stop = True
+            return
 
         if config.max_file_size is not None:
             size = dir_size(config.output_dir)
             if size >= config.max_file_size:
-                reason = (f"reached max-file-size cap "
-                          f"({size}B >= {config.max_file_size}B)")
-                logger.info(reason)
-                progress.on_halt(reason)
-                return reason
+                if state.halt_reason is None:
+                    state.halt_reason = (
+                        f"reached max-file-size cap "
+                        f"({size}B >= {config.max_file_size}B)"
+                    )
+                    logger.info(state.halt_reason)
+                    progress.on_halt(state.halt_reason)
+                state.stop = True
+                return
 
-        row = conn.execute(
-            "SELECT id, url_canonical, depth FROM pending WHERE run_id = ?"
-            " ORDER BY id ASC LIMIT 1",
-            (run_id,),
-        ).fetchone()
-        if row is None:
-            reason = "queue drained"
-            logger.info(reason)
-            progress.on_halt(reason)
-            return None
+        claimed = _claim_pending(conn, run_id)
+        if claimed is None:
+            # Queue is empty — but other workers may still be mid-fetch and
+            # will enqueue new URLs. Only quit when everyone is idle too.
+            if state.in_flight == 0:
+                if state.halt_reason is None:
+                    state.halt_reason = "queue drained"
+                    logger.info(state.halt_reason)
+                    progress.on_halt(state.halt_reason)
+                state.stop = True
+                return
+            await asyncio.sleep(0.1)
+            continue
 
-        pending_id = row["id"]
-        url = row["url_canonical"]
-        depth = row["depth"]
+        pending_id = claimed["id"]
+        url = claimed["url_canonical"]
+        depth = claimed["depth"]
 
         if depth > config.max_depth:
             conn.execute("DELETE FROM pending WHERE id = ?", (pending_id,))
@@ -488,12 +651,16 @@ async def _crawl_loop(
             conn.commit()
             continue
 
-        logger.info("[%d] depth=%d %s", pages_done + 1, depth, url)
-        page_kind, status, title = await _fetch_one(
-            conn, run_id, browser, config, start_canonical, url, depth,
-        )
-        conn.execute("DELETE FROM pending WHERE id = ?", (pending_id,))
-        conn.commit()
+        state.in_flight += 1
+        try:
+            logger.info("[w%d] depth=%d %s", worker_id, depth, url)
+            page_kind, status, title = await _fetch_one(
+                conn, run_id, browser, config, start_canonical, url, depth,
+            )
+        finally:
+            conn.execute("DELETE FROM pending WHERE id = ?", (pending_id,))
+            conn.commit()
+            state.in_flight -= 1
 
         archived_count = conn.execute(
             "SELECT COUNT(*) FROM pages WHERE run_id = ? AND archive_path IS NOT NULL",
@@ -508,13 +675,13 @@ async def _crawl_loop(
         queue_size = conn.execute(
             "SELECT COUNT(*) FROM pending WHERE run_id = ?", (run_id,),
         ).fetchone()[0]
-        archived_bytes = dir_size(config.output_dir)
 
         progress.on_page(
-            idx=pages_done + 1, depth=depth, url=url, status=status,
-            title=title, archived_bytes=archived_bytes, queue_size=queue_size,
-            archived_count=archived_count, discovered=discovered,
-            kind=page_kind,
+            idx=archived_count, depth=depth, url=url, status=status,
+            title=title, archived_bytes=dir_size(config.output_dir),
+            queue_size=queue_size, archived_count=archived_count,
+            discovered=discovered, kind=page_kind,
+            in_flight=state.in_flight,
         )
 
         await asyncio.sleep(config.delay_ms / 1000)

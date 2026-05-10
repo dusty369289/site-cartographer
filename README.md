@@ -51,7 +51,8 @@ output/omid-20260510-171535/
 | `--max-pages N` | 100 | Cap on internal pages crawled |
 | `--max-depth N` | 15 | BFS depth cap |
 | `--max-file-size SIZE` | unlimited | Halt when archive grows past this (e.g. `500MB`, `2GB`) |
-| `--delay-ms N` | 250 | Politeness delay between page fetches |
+| `--workers N` | 1 | Parallel discovery workers (1–8). Each runs as its own asyncio task with an independent Playwright page; they share one browser context and one SQLite DB |
+| `--delay-ms N` | 250 | Per-worker politeness delay between page fetches |
 | `--include-subdomains` | off | Treat any subdomain of base as in-scope (default already strips `www.`) |
 | `--respect-robots` | off | Honour `/robots.txt` (opt-in) |
 | `--resume DIR` | — | Resume an unfinished run |
