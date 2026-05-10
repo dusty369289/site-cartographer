@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS runs (
   finished_at TEXT,
   config_json TEXT NOT NULL,
   homepage_body_hash TEXT,
-  halt_reason TEXT
+  halt_reason TEXT,
+  dropped_for_depth INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS pages (
@@ -166,7 +167,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     """Backfill columns added after the initial schema. SQLite only supports
     ADD COLUMN, which is enough for our additive changes."""
     runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
-    for col in ("name TEXT", "halt_reason TEXT"):
+    for col in (
+        "name TEXT",
+        "halt_reason TEXT",
+        "dropped_for_depth INTEGER NOT NULL DEFAULT 0",
+    ):
         col_name = col.split()[0]
         if col_name not in runs_cols:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
@@ -639,6 +644,11 @@ async def _bfs_worker(
 
         if depth > config.max_depth:
             conn.execute("DELETE FROM pending WHERE id = ?", (pending_id,))
+            conn.execute(
+                "UPDATE runs SET dropped_for_depth = dropped_for_depth + 1"
+                " WHERE id = ?",
+                (run_id,),
+            )
             conn.commit()
             continue
 

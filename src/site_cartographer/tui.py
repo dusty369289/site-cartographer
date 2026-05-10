@@ -269,6 +269,59 @@ def _load_run_config(run_dir: Path) -> dict:
         return {}
 
 
+def _load_run_diagnostics(run_dir: Path) -> dict:
+    """Read halt_reason and dropped-for-depth counter for the latest run."""
+    db = run_dir / "crawl.sqlite"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        select_cols = ["halt_reason"] if "halt_reason" in cols else []
+        if "dropped_for_depth" in cols:
+            select_cols.append("dropped_for_depth")
+        if not select_cols:
+            return {}
+        row = conn.execute(
+            f"SELECT {', '.join(select_cols)} FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {}
+    return {k: row[k] for k in row.keys()}
+
+
+def _suggest_resume_bumps(
+    halt_reason: str | None,
+    dropped_for_depth: int,
+    cur_max_pages: int,
+    cur_max_depth: int,
+    cur_max_size: int | None,
+) -> tuple[int, int, int | None]:
+    """Pick sensible defaults for the resume prompts based on what the
+    previous run hit.
+
+    - 'reached max-pages cap …'      -> double max_pages
+    - 'reached max-file-size …'      -> double max_file_size (if set)
+    - 'interrupted by user' / 'queue drained' / unknown -> leave alone
+    - dropped_for_depth > 0          -> double max_depth (independent of halt)
+    """
+    pages = cur_max_pages
+    depth = cur_max_depth
+    size = cur_max_size
+
+    reason = halt_reason or ""
+    if "max-pages" in reason:
+        pages = cur_max_pages * 2
+    if "max-file-size" in reason and cur_max_size:
+        size = cur_max_size * 2
+
+    if dropped_for_depth > 0:
+        depth = cur_max_depth * 2
+
+    return pages, depth, size
+
+
 def _interactive_resume(output_root: Path) -> None:
     runs = [r for r in list_runs(output_root) if r.is_resumable]
     if not runs:
@@ -298,27 +351,58 @@ def _interactive_resume(output_root: Path) -> None:
         return
 
     existing = _load_run_config(selected.dir)
+    diag = _load_run_diagnostics(selected.dir)
     cur_max_pages = int(existing.get("max_pages") or 100)
     cur_max_depth = int(existing.get("max_depth") or 15)
     cur_max_size = existing.get("max_file_size")
     cur_workers = int(existing.get("parallel_workers") or 1)
     cur_size_str = format_size(cur_max_size) if cur_max_size else ""
 
-    suggested_pages = cur_max_pages + max(50, cur_max_pages)
+    sug_pages, sug_depth, sug_size = _suggest_resume_bumps(
+        halt_reason=diag.get("halt_reason"),
+        dropped_for_depth=int(diag.get("dropped_for_depth") or 0),
+        cur_max_pages=cur_max_pages,
+        cur_max_depth=cur_max_depth,
+        cur_max_size=cur_max_size,
+    )
+    sug_size_str = format_size(sug_size) if sug_size else ""
+
+    if diag.get("halt_reason"):
+        console.print(
+            f"[dim]previous run halted: {diag['halt_reason']}"
+            + (f" · {diag.get('dropped_for_depth')} URLs dropped for depth"
+               if int(diag.get("dropped_for_depth") or 0) > 0 else "")
+            + "[/dim]"
+        )
+
+    def _pages_label() -> str:
+        if sug_pages != cur_max_pages:
+            return f"max pages (was {cur_max_pages}, suggesting {sug_pages}):"
+        return f"max pages (was {cur_max_pages}):"
+
+    def _depth_label() -> str:
+        if sug_depth != cur_max_depth:
+            return (f"max depth (was {cur_max_depth}, suggesting {sug_depth} —"
+                    f" depth was limiting):")
+        return f"max depth (was {cur_max_depth}):"
+
+    def _size_label() -> str:
+        if sug_size != cur_max_size and sug_size is not None:
+            return (f"max archive size (was {cur_size_str or 'unlimited'},"
+                    f" suggesting {sug_size_str}; blank = unlimited):")
+        return (f"max archive size (was {cur_size_str or 'unlimited'};"
+                f" blank = unlimited):")
 
     s = _QUESTIONARY_STYLE
     answers = questionary.form(
         max_pages=questionary.text(
-            f"max pages (was {cur_max_pages}, suggesting {suggested_pages}):",
-            default=str(suggested_pages), style=s,
+            _pages_label(), default=str(sug_pages), style=s,
         ),
         max_depth=questionary.text(
-            f"max depth (was {cur_max_depth}):",
-            default=str(cur_max_depth), style=s,
+            _depth_label(), default=str(sug_depth), style=s,
         ),
         max_size=questionary.text(
-            f"max archive size (was {cur_size_str or 'unlimited'}; blank = unlimited):",
-            default=cur_size_str, style=s,
+            _size_label(), default=sug_size_str, style=s,
         ),
         workers=questionary.text(
             f"parallel workers (was {cur_workers}, max {MAX_WORKERS}):",
