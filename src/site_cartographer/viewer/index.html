@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>site-cartographer viewer</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
+  #app { display: grid; grid-template-columns: 1fr 480px; height: 100vh; }
+  #cy { background: #111; }
+  #panel { display: flex; flex-direction: column; border-left: 1px solid #333; background: #1a1a1a; color: #eee; }
+  #panel-header { padding: 8px 12px; background: #222; border-bottom: 1px solid #333; font-size: 13px; }
+  #panel-header a { color: #6ab0ff; text-decoration: none; word-break: break-all; }
+  #panel-controls { padding: 6px 12px; background: #181818; border-bottom: 1px solid #333; font-size: 12px; }
+  #panel-controls label { margin-right: 12px; }
+  #frame-wrap { position: relative; flex: 1; overflow: hidden; background: #000; }
+  #page-iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+  #empty-msg { padding: 16px; color: #777; }
+  #stats { padding: 6px 12px; font-size: 11px; color: #888; border-top: 1px solid #333; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="cy"></div>
+  <div id="panel">
+    <div id="panel-header"><span id="panel-title">site-cartographer</span></div>
+    <div id="panel-controls">
+      <label><input type="checkbox" id="toggle-highlights" checked> highlight links</label>
+      <a id="open-page" href="#" target="_blank" style="color:#6ab0ff;display:none;">open in new tab</a>
+    </div>
+    <div id="frame-wrap">
+      <div id="empty-msg">click a node to view its page</div>
+      <iframe id="page-iframe" style="display:none;" sandbox="allow-same-origin allow-scripts allow-forms"></iframe>
+    </div>
+    <div id="stats"></div>
+  </div>
+</div>
+<script src="cytoscape.min.js"></script>
+<script src="viewer.js"></script>
+</body>
+</html>

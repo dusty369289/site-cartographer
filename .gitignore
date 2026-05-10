@@ -45,6 +45,9 @@ Thumbs.db
 output/
 screenshots/
 *.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
 *.db
 .env
 .env.local
