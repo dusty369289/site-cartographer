@@ -1,8 +1,8 @@
 """Build the graph.json that the Sigma.js viewer consumes.
 
 Pulls pages + edges out of SQLite, collapses duplicate-body URL aliases into
-their canonical, runs ForceAtlas2 to pre-compute layout positions, and emits
-a flat `{nodes:[{id, x, y, ...}], edges:[{source, target, ...}]}` JSON file.
+their canonical, and emits a flat `{nodes:[...], edges:[...]}` JSON file.
+The viewer runs d3-force in-browser so layout positions are not baked here.
 """
 from __future__ import annotations
 
@@ -10,9 +10,6 @@ import json
 import logging
 import sqlite3
 from pathlib import Path
-
-import networkx as nx
-from fa2_modified import ForceAtlas2
 
 from .archive import page_key, run_layout
 
@@ -24,8 +21,7 @@ def _to_url_path(p: str | None) -> str | None:
 
 
 def export_graph_json(run_dir: Path, run_id: int | None = None) -> Path:
-    """Read SQLite for the latest (or specified) run and write graph.json
-    with pre-computed ForceAtlas2 layout coordinates."""
+    """Read SQLite for the latest (or specified) run and write graph.json."""
     layout = run_layout(run_dir)
     conn = sqlite3.connect(layout["db"])
     conn.row_factory = sqlite3.Row
@@ -41,8 +37,6 @@ def export_graph_json(run_dir: Path, run_id: int | None = None) -> Path:
         nodes, edges = _collect(conn, run_id)
     finally:
         conn.close()
-
-    _apply_forceatlas2(nodes, edges)
 
     out = layout["root"] / "graph.json"
     out.write_text(
@@ -171,47 +165,3 @@ def _collect(conn: sqlite3.Connection, run_id: int) -> tuple[list[dict], list[di
         })
 
     return nodes, edges
-
-
-def _apply_forceatlas2(nodes: list[dict], edges: list[dict]) -> None:
-    """Run ForceAtlas2 over the (collapsed) graph and attach x,y to each node.
-
-    Uses Barnes-Hut for O(n log n) per iteration. ~2 seconds for 1k nodes,
-    ~30 seconds for 10k. Direction is dropped — force-directed layout treats
-    the graph as undirected for repulsion/attraction purposes.
-    """
-    if not nodes:
-        return
-
-    g = nx.Graph()
-    for n in nodes:
-        g.add_node(n["id"])
-    for e in edges:
-        g.add_edge(e["source"], e["target"])
-
-    # 1000 iterations is the FA2 paper's "settled" threshold; doubling to
-    # 2000 takes much longer for negligible visual improvement.
-    iterations = 1000 if len(nodes) <= 5000 else 500
-    fa2 = ForceAtlas2(
-        outboundAttractionDistribution=False,
-        edgeWeightInfluence=1.0,
-        jitterTolerance=1.0,
-        barnesHutOptimize=True,
-        barnesHutTheta=1.2,
-        scalingRatio=10.0,
-        strongGravityMode=False,
-        gravity=1.0,
-        verbose=False,
-    )
-    logger.info("running ForceAtlas2 on %d nodes / %d edges (%d iters)",
-                len(nodes), len(edges), iterations)
-    positions = fa2.forceatlas2_networkx_layout(g, pos=None, iterations=iterations)
-
-    for n in nodes:
-        pos = positions.get(n["id"])
-        if pos is not None:
-            n["x"] = float(pos[0])
-            n["y"] = float(pos[1])
-        else:
-            n["x"] = 0.0
-            n["y"] = 0.0
