@@ -92,10 +92,29 @@
       </div>
     </fieldset>
 
-    <div class="checkbox-row">
-      <input type="checkbox" id="include_subdomains" name="include_subdomains" />
-      <label for="include_subdomains">also crawl subdomains (e.g. <code>blog.foo.com</code> when scanning <code>foo.com</code>) — <code>www.</code> is always treated as same-site</label>
-    </div>
+    <fieldset style="border:1px solid var(--border); border-radius:6px; padding:12px 14px; margin-bottom:14px;">
+      <legend style="color:var(--fg-dim); font-size:12px; padding:0 6px;">scope (which hosts count as in-scope)</legend>
+      <div style="font-size:11px; color:var(--fg-faint); margin-bottom:8px;">
+        <code>www.</code> is always treated as same-site regardless.
+      </div>
+      <div style="display:grid; gap:6px;">
+        <label class="checkbox-row"><input type="radio" name="scope_mode" value="host" checked /> <strong>exact host</strong> (default) — only the host of the start URL</label>
+        <label class="checkbox-row"><input type="radio" name="scope_mode" value="descendants" /> <strong>host + descendants</strong> — adds <code>foo.host</code>, <code>bar.host</code></label>
+        <label class="checkbox-row"><input type="radio" name="scope_mode" value="domain" /> <strong>any subdomain of</strong>:
+          <input type="text" name="scope_domain" placeholder="e.g. 3net.dev" style="margin-left:8px; max-width:220px;" />
+        </label>
+        <div style="font-size:11px; color:var(--fg-faint); margin-left:24px; margin-top:-4px;">
+          captures sibling subdomains too (e.g. <code>ytrss.3net.dev</code> when starting at <code>public.3net.dev</code>)
+        </div>
+        <label class="checkbox-row"><input type="radio" name="scope_mode" value="regex" /> <strong>regex match</strong>:
+          <input type="text" name="scope_regex" placeholder='e.g. ^(blog|api)\.foo\.com$' style="margin-left:8px; max-width:220px;" />
+        </label>
+        <div style="font-size:11px; color:var(--fg-faint); margin-left:24px; margin-top:-4px;">
+          matched against the host string after <code>www.</code> stripping
+        </div>
+      </div>
+    </fieldset>
+
     <div class="checkbox-row">
       <input type="checkbox" id="respect_robots" name="respect_robots" />
       <label for="respect_robots">honour the site's robots.txt disallow rules</label>
@@ -138,9 +157,16 @@ form.addEventListener("submit", async (ev) => {
   const payload = {};
   for (const [k, v] of fd.entries()) {
     if (k.startsWith("ext_") || k === "link_regex") continue;
+    if (k === "scope_domain" || k === "scope_regex") continue;
     payload[k] = v;
   }
-  payload.include_subdomains = !!fd.get("include_subdomains");
+  // Scope: take value from whichever input matches the chosen mode.
+  const scopeMode = fd.get("scope_mode") || "host";
+  let scopeValue = "";
+  if (scopeMode === "domain") scopeValue = (fd.get("scope_domain") || "").toString().trim();
+  else if (scopeMode === "regex") scopeValue = (fd.get("scope_regex") || "").toString().trim();
+  payload.scope_mode = scopeMode;
+  payload.scope_value = scopeValue;
   payload.respect_robots = !!fd.get("respect_robots");
 
   // Collect chosen extractors as a list.

@@ -13,10 +13,11 @@ from .browser import BrowserSession
 from .links import (
     DEFAULT_EXTRACTORS,
     KNOWN_EXTRACTORS,
+    SCOPE_MODES,
     body_hash,
     canonicalize,
     extract_links,
-    is_same_origin,
+    is_in_scope,
 )
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,9 @@ class CrawlConfig:
     delay_ms: int = 250
     page_timeout_ms: int = 30000
     parallel_workers: int = 1
-    include_subdomains: bool = False
+    include_subdomains: bool = False  # legacy alias for scope_mode="descendants"
+    scope_mode: str = "host"
+    scope_value: str = ""
     respect_robots: bool = False
     external_policy: str = "metadata"
     link_extractors: tuple[str, ...] = DEFAULT_EXTRACTORS
@@ -149,6 +152,14 @@ class CrawlConfig:
             raise ValueError(
                 f"parallel_workers must be between 1 and {MAX_WORKERS},"
                 f" got {self.parallel_workers}"
+            )
+        # Promote legacy include_subdomains -> scope_mode unless caller set
+        # scope_mode explicitly.
+        if self.include_subdomains and self.scope_mode == "host":
+            object.__setattr__(self, "scope_mode", "descendants")
+        if self.scope_mode not in SCOPE_MODES:
+            raise ValueError(
+                f"scope_mode must be one of {SCOPE_MODES}, got {self.scope_mode!r}"
             )
         # Coerce + validate extractors
         ext = tuple(e.strip() for e in self.link_extractors if e and e.strip())
@@ -834,9 +845,10 @@ async def _fetch_one(
             extractors=set(config.link_extractors),
             custom_regex=config.custom_link_regex,
         ):
-            same_origin = is_same_origin(
+            same_origin = is_in_scope(
                 link.url, start_canonical,
-                include_subdomains=config.include_subdomains,
+                scope_mode=config.scope_mode,
+                scope_value=config.scope_value,
             )
             if not same_origin and config.external_policy == "ignore":
                 continue  # silently drop the edge AND the destination

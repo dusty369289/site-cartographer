@@ -154,6 +154,8 @@ def _build_config_from_payload(
         page_timeout_ms=int(payload.get("page_timeout_ms", 30000)),
         parallel_workers=int(payload.get("parallel_workers", 1)),
         include_subdomains=bool(payload.get("include_subdomains", False)),
+        scope_mode=payload.get("scope_mode", "host"),
+        scope_value=payload.get("scope_value", "") or "",
         respect_robots=bool(payload.get("respect_robots", False)),
         external_policy=payload.get("external_policy", "metadata"),
         link_extractors=tuple(extractors),

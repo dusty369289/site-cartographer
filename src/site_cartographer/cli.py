@@ -58,9 +58,25 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
                    help="per-worker politeness delay between fetches")
     p.add_argument("--page-timeout-ms", type=int, default=30000)
     p.add_argument(
+        "--scope-mode", default="host",
+        choices=("host", "descendants", "domain", "regex"),
+        help="how to decide which hosts are in-scope. "
+             "host (default): exact start host (www. always stripped). "
+             "descendants: also subdomains of the start host. "
+             "domain: pass --scope-value DOMAIN to match any host equal to "
+             "or ending in .DOMAIN — captures sibling subdomains "
+             "(e.g. ytrss.3net.dev when starting at public.3net.dev). "
+             "regex: pass --scope-value REGEX matched against the host string",
+    )
+    p.add_argument(
+        "--scope-value", default="",
+        help="value for --scope-mode domain (a domain like 3net.dev) or "
+             "--scope-mode regex (a Python regex)",
+    )
+    p.add_argument(
         "--include-subdomains", action="store_true",
-        help="also crawl any subdomain of the start host (e.g. blog.foo.com"
-             " when starting at foo.com); `www.` is always treated as same-site",
+        help="legacy alias: equivalent to --scope-mode descendants. "
+             "prefer --scope-mode for new flags",
     )
     p.add_argument(
         "--respect-robots", action="store_true",
@@ -180,6 +196,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         page_timeout_ms=args.page_timeout_ms,
         parallel_workers=args.workers,
         include_subdomains=args.include_subdomains,
+        scope_mode=args.scope_mode,
+        scope_value=args.scope_value,
         respect_robots=args.respect_robots,
         external_policy=args.external_policy,
         link_extractors=_parse_extractors(args.link_extractors),

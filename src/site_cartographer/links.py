@@ -67,21 +67,58 @@ def _strip_www(host: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-def is_same_origin(url: str, base: str, *, include_subdomains: bool) -> bool:
-    """Whether *url* is the same origin as *base* for crawl-scope purposes.
+SCOPE_MODES = ("host", "descendants", "domain", "regex")
 
-    Scheme and ports are ignored (sites mix http/https). A leading `www.` is
-    stripped from both sides — `www.example.com` and `example.com` are treated
-    as the same site by default. With *include_subdomains*, any descendant of
-    the base host also matches.
+
+def is_in_scope(
+    url: str, base: str, *, scope_mode: str = "host", scope_value: str = "",
+) -> bool:
+    """Whether *url* belongs to the crawl scope rooted at *base*.
+
+    Scheme and port are ignored (sites mix http/https). Leading `www.` is
+    stripped from hosts so `www.foo.com` and `foo.com` are always equivalent.
+
+    Modes:
+      * ``host``         — only the exact base host (default).
+      * ``descendants``  — base host + any descendant subdomain
+        (e.g. ``foo.base.com`` matches base ``base.com``).
+      * ``domain``       — *scope_value* is a domain; any host equal to it or
+        ending in ``.scope_value`` matches. Useful for sibling subdomains
+        (e.g. with base ``public.3net.dev`` and scope ``3net.dev``,
+        ``ytrss.3net.dev`` is in scope).
+      * ``regex``        — *scope_value* is a regex; matched against the
+        target host (post-www-strip).
     """
     target = _strip_www(urlsplit(url).netloc.lower())
     base_host = _strip_www(urlsplit(base).netloc.lower())
-    if target == base_host:
-        return True
-    if include_subdomains and base_host:
-        return target.endswith("." + base_host)
-    return False
+
+    if scope_mode == "host":
+        return target == base_host
+    if scope_mode == "descendants":
+        if not base_host:
+            return False
+        return target == base_host or target.endswith("." + base_host)
+    if scope_mode == "domain":
+        d = (scope_value or "").lower().lstrip(".")
+        if not d:
+            return target == base_host
+        return target == d or target.endswith("." + d)
+    if scope_mode == "regex":
+        if not scope_value:
+            return False
+        try:
+            return bool(re.search(scope_value, target))
+        except re.error:
+            return False
+    return target == base_host
+
+
+def is_same_origin(url: str, base: str, *, include_subdomains: bool) -> bool:
+    """Backwards-compat shim. Prefer :func:`is_in_scope`."""
+    return is_in_scope(
+        url, base,
+        scope_mode="descendants" if include_subdomains else "host",
+    )
 
 
 def body_hash(content: str) -> str:
