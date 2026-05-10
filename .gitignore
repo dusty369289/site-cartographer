@@ -1,4 +1,4 @@
-# Python
+# Python ──────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -19,29 +19,53 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+pip-log.txt
+pip-delete-this-directory.txt
 
-# Virtual envs
+# Virtual envs ────────────────────────────────────────────────────────────────
 .venv/
 venv/
 env/
 ENV/
+.python-version
 
-# Tooling
+# Tooling ─────────────────────────────────────────────────────────────────────
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
 .coverage
+.coverage.*
+coverage.xml
+*.cover
 htmlcov/
+.hypothesis/
 
-# IDE
+# IDEs / editors ──────────────────────────────────────────────────────────────
 .vscode/
 .idea/
+.fleet/
+.zed/
+.cursor/
+*.swp
+*.swo
+*~
 
-# OS
+# OS junk ─────────────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Project
+# Node (in case any JS tooling shows up) ──────────────────────────────────────
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+
+# Crawl output (NEVER commit any of this — scan dirs may contain page content
+# from third-party sites and large binary archives) ───────────────────────────
 output/
 screenshots/
 *.sqlite
@@ -49,9 +73,22 @@ screenshots/
 *.sqlite-wal
 *.sqlite-shm
 *.db
-.env
-.env.local
+*.mhtml
 
-# Playwright
+# Playwright artefacts ────────────────────────────────────────────────────────
 playwright-report/
 test-results/
+playwright/.cache/
+
+# Secrets / local config ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.cookiejar
+cookies.txt
+
+# Logs ────────────────────────────────────────────────────────────────────────
+*.log
+logs/
