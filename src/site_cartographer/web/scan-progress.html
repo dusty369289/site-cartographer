@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>scan progress · site-cartographer</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<nav class="topbar">
+  <span class="brand">site-cartographer</span>
+  <a href="/">home</a>
+  <a href="/scans">saved scans</a>
+  <a href="/scan-new">new scan</a>
+  <a href="/scan-resume">resume</a>
+  <span class="spacer"></span>
+</nav>
+
+<main>
+  <h1 id="page-title">live scan</h1>
+  <p id="run-meta" style="color:var(--fg-faint); font-size:12px;"></p>
+
+  <div class="card">
+    <div class="progress-bar"><div class="fill" id="progress-bar"></div></div>
+    <div id="progress-panel">
+      <dl id="progress-stats">
+        <dt>archived</dt><dd id="stat-archived">0</dd>
+        <dt>discovered</dt><dd id="stat-discovered">0</dd>
+        <dt>queue</dt><dd id="stat-queue">0</dd>
+        <dt>archive size</dt><dd id="stat-size">—</dd>
+        <dt>active workers</dt><dd id="stat-workers">—</dd>
+      </dl>
+      <div>
+        <h3>now fetching</h3>
+        <div id="progress-current">(starting…)</div>
+        <h3 style="margin-top:14px;">recent</h3>
+        <div id="progress-feed"></div>
+      </div>
+    </div>
+    <div id="halt-banner"></div>
+    <div class="actions" style="margin-top:14px;">
+      <button id="stop-btn" class="danger">pause scan</button>
+      <a id="view-link" class="btn primary" style="display:none;">open viewer</a>
+      <a class="btn" href="/scans">back to scans</a>
+    </div>
+  </div>
+</main>
+
+<script type="module">
+import { fmtBytes, escapeHtml, api } from "/static/app.js";
+
+const params = new URLSearchParams(location.search);
+const name = params.get("name");
+if (!name) { document.getElementById("page-title").textContent = "no scan name supplied"; }
+
+document.getElementById("run-meta").textContent = name;
+
+const stats = {
+  bar: document.getElementById("progress-bar"),
+  archived: document.getElementById("stat-archived"),
+  discovered: document.getElementById("stat-discovered"),
+  queue: document.getElementById("stat-queue"),
+  size: document.getElementById("stat-size"),
+  workers: document.getElementById("stat-workers"),
+  current: document.getElementById("progress-current"),
+  feed: document.getElementById("progress-feed"),
+  halt: document.getElementById("halt-banner"),
+  stop: document.getElementById("stop-btn"),
+  viewLink: document.getElementById("view-link"),
+};
+
+let maxPages = 0;
+let workers = 1;
+
+function setBar(pct) {
+  stats.bar.style.width = Math.min(100, pct).toFixed(1) + "%";
+}
+
+function applyEvent(ev) {
+  if (ev.type === "start") {
+    maxPages = ev.max_pages || 0;
+    workers = ev.workers || 1;
+    document.getElementById("page-title").textContent = `live scan · ${name}`;
+    document.getElementById("run-meta").textContent =
+      `${ev.start_url || name} · max ${maxPages} pages · ${workers} worker(s)`;
+  } else if (ev.type === "page") {
+    stats.archived.textContent = ev.archived_count;
+    stats.discovered.textContent = ev.discovered;
+    stats.queue.textContent = ev.queue_size;
+    stats.size.textContent = fmtBytes(ev.archived_bytes);
+    if (ev.in_flight != null) {
+      stats.workers.textContent = `${ev.in_flight} / ${workers}`;
+    }
+    stats.current.textContent = ev.url;
+    if (maxPages > 0) setBar((ev.archived_count / maxPages) * 100);
+    const glyph = ({
+      archived: "+", phantom: "?", duplicate: "=", error: "!",
+    })[ev.kind] || ev.kind;
+    const row = document.createElement("div");
+    row.className = "feed-row";
+    row.innerHTML =
+      `<span class="glyph ${escapeHtml(ev.kind)}">${escapeHtml(glyph)}</span> ` +
+      `<span style="color:var(--fg-faint);">d${ev.depth}</span> ` +
+      `<span>${escapeHtml(ev.url)}</span>` +
+      (ev.title ? ` <span style="color:var(--fg-faint);">— ${escapeHtml(ev.title.slice(0, 60))}</span>` : "");
+    stats.feed.appendChild(row);
+    while (stats.feed.children.length > 200) {
+      stats.feed.removeChild(stats.feed.firstChild);
+    }
+    stats.feed.scrollTop = stats.feed.scrollHeight;
+  } else if (ev.type === "halt") {
+    stats.halt.style.display = "block";
+    stats.halt.textContent = `halted: ${ev.reason}`;
+  } else if (ev.type === "finish") {
+    stats.halt.style.display = "block";
+    stats.halt.classList.add("done");
+    stats.halt.textContent =
+      `done: ${ev.archived_count} archived, ${ev.total_pages} discovered, ${ev.edges} edges`;
+  } else if (ev.type === "error") {
+    stats.halt.style.display = "block";
+    stats.halt.classList.add("error");
+    stats.halt.textContent = `error: ${ev.error}`;
+  } else if (ev.type === "done") {
+    stats.stop.disabled = true;
+    stats.stop.textContent = "scan complete";
+    stats.viewLink.style.display = "inline-block";
+    stats.viewLink.href = `/scans/${encodeURIComponent(name)}/`;
+    setBar(100);
+  }
+}
+
+const es = new EventSource(`/api/scans/${encodeURIComponent(name)}/events`);
+es.onmessage = (m) => {
+  try { applyEvent(JSON.parse(m.data)); }
+  catch (e) { console.error(e); }
+};
+es.onerror = () => {
+  // Browser auto-reconnects; nothing to do here.
+};
+
+stats.stop.addEventListener("click", async () => {
+  if (!confirm("pause this scan? you can resume it from the home menu later.")) return;
+  stats.stop.disabled = true;
+  stats.stop.textContent = "pausing…";
+  try { await api(`/api/scans/${encodeURIComponent(name)}/stop`, { method: "POST" }); }
+  catch (e) { alert(e.message); stats.stop.disabled = false; stats.stop.textContent = "pause scan"; }
+});
+</script>
+</body>
+</html>

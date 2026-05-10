@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>new scan · site-cartographer</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<nav class="topbar">
+  <span class="brand">site-cartographer</span>
+  <a href="/">home</a>
+  <a href="/scans">saved scans</a>
+  <a href="/scan-new" class="active">new scan</a>
+  <a href="/scan-resume">resume</a>
+  <span class="spacer"></span>
+</nav>
+
+<main>
+  <h1>new scan</h1>
+  <form id="scan-form" class="card">
+    <div class="row">
+      <div class="field" style="flex: 3;">
+        <label>start URL</label>
+        <input type="url" name="start_url" required placeholder="https://example.com/" />
+      </div>
+      <div class="field">
+        <label>name (optional)</label>
+        <input type="text" name="name" placeholder="my-scan" />
+        <div class="help">used in the run dir name</div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field"><label>max pages</label><input type="number" name="max_pages" value="100" min="1" /></div>
+      <div class="field"><label>max depth</label><input type="number" name="max_depth" value="15" min="1" /></div>
+      <div class="field">
+        <label>max archive size</label>
+        <input type="text" name="max_file_size" placeholder="500MB or 2GB (blank = unlimited)" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>parallel workers</label>
+        <input type="number" name="parallel_workers" value="1" min="1" max="8" />
+        <div class="help">1-8 (each is a separate Playwright page sharing one Chromium)</div>
+      </div>
+      <div class="field">
+        <label>per-worker delay (ms)</label>
+        <input type="number" name="delay_ms" value="250" min="0" />
+      </div>
+      <div class="field">
+        <label>page timeout (ms)</label>
+        <input type="number" name="page_timeout_ms" value="30000" min="1000" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>external link policy</label>
+        <select name="external_policy">
+          <option value="metadata">metadata only — record URL + edge, don't fetch (default)</option>
+          <option value="archive">archive — fetch &amp; save the external page</option>
+          <option value="crawl">crawl — archive AND extract its links (one hop)</option>
+          <option value="ignore">ignore — silently drop, externals don't show up</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="include_subdomains" name="include_subdomains" />
+      <label for="include_subdomains">also crawl subdomains (e.g. <code>blog.foo.com</code> when scanning <code>foo.com</code>) — <code>www.</code> is always treated as same-site</label>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="respect_robots" name="respect_robots" />
+      <label for="respect_robots">honour the site's robots.txt disallow rules</label>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="primary">start scan</button>
+      <a class="btn" href="/">cancel</a>
+    </div>
+    <div id="form-error" style="color:var(--danger); margin-top:10px; display:none;"></div>
+  </form>
+</main>
+
+<script type="module">
+import { api } from "/static/app.js";
+const form = document.getElementById("scan-form");
+const errBox = document.getElementById("form-error");
+
+form.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  errBox.style.display = "none";
+
+  const fd = new FormData(form);
+  const payload = {};
+  for (const [k, v] of fd.entries()) payload[k] = v;
+  payload.include_subdomains = !!fd.get("include_subdomains");
+  payload.respect_robots = !!fd.get("respect_robots");
+
+  const submitBtn = form.querySelector("button[type=submit]");
+  submitBtn.disabled = true;
+  submitBtn.textContent = "starting…";
+
+  try {
+    const res = await api("/api/scans", { method: "POST", body: JSON.stringify(payload) });
+    window.location.href = res.redirect;
+  } catch (e) {
+    errBox.textContent = e.message;
+    errBox.style.display = "block";
+    submitBtn.disabled = false;
+    submitBtn.textContent = "start scan";
+  }
+});
+</script>
+</body>
+</html>

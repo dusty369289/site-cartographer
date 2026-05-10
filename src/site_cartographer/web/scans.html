@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>scans · site-cartographer</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<nav class="topbar">
+  <span class="brand">site-cartographer</span>
+  <a href="/">home</a>
+  <a href="/scans" class="active">saved scans</a>
+  <a href="/scan-new">new scan</a>
+  <a href="/scan-resume">resume</a>
+  <span class="spacer"></span>
+</nav>
+
+<main>
+  <h1>saved scans</h1>
+  <div id="scan-table"></div>
+</main>
+
+<script type="module">
+import { api, fmtBytes, statusBadge, fmtTime, escapeHtml } from "/static/app.js";
+
+async function load() {
+  const root = document.getElementById("scan-table");
+  root.innerHTML = `<p style="color:var(--fg-faint);">loading…</p>`;
+  let scans;
+  try {
+    scans = await api("/api/scans");
+  } catch (e) {
+    root.innerHTML = `<p style="color:var(--danger);">${escapeHtml(e.message)}</p>`;
+    return;
+  }
+  if (scans.length === 0) {
+    root.innerHTML = `<p style="color:var(--fg-faint);">no scans yet. <a href="/scan-new">start one</a>.</p>`;
+    return;
+  }
+  root.innerHTML = `<table class="scans"><thead><tr>
+    <th>name</th><th>status</th><th>started</th><th>url</th>
+    <th>archived</th><th>queue</th><th>size</th><th></th>
+  </tr></thead><tbody>` + scans.map(s => `
+    <tr data-name="${escapeHtml(s.name)}">
+      <td><strong>${escapeHtml(s.display_name)}</strong></td>
+      <td>${statusBadge(s)}</td>
+      <td>${escapeHtml(fmtTime(s.started_at))}</td>
+      <td class="url">${escapeHtml(s.url || "")}</td>
+      <td>${s.archived_count}</td>
+      <td>${s.queue_depth}</td>
+      <td>${escapeHtml(s.total_bytes_human)}</td>
+      <td class="actions">
+        <a class="btn" href="/scans/${encodeURIComponent(s.name)}/">view</a>
+        ${s.running
+          ? `<a class="btn" href="/scan-progress?name=${encodeURIComponent(s.name)}">live</a>`
+          : (s.is_resumable
+              ? `<a class="btn" href="/scan-resume?name=${encodeURIComponent(s.name)}">resume</a>`
+              : "")}
+        <button class="danger" data-action="delete" ${s.running ? "disabled" : ""}>delete</button>
+      </td>
+    </tr>
+  `).join("") + `</tbody></table>`;
+
+  root.querySelectorAll('button[data-action="delete"]').forEach(btn => {
+    btn.addEventListener("click", async (ev) => {
+      const tr = ev.target.closest("tr");
+      const name = tr.dataset.name;
+      const confirmed = window.prompt(
+        `Type the scan name to permanently delete it.\n\nname: ${name}`
+      );
+      if (confirmed !== name) return;
+      try {
+        await api(`/api/scans/${encodeURIComponent(name)}`, { method: "DELETE" });
+        await load();
+      } catch (e) {
+        alert("delete failed: " + e.message);
+      }
+    });
+  });
+}
+load();
+</script>
+</body>
+</html>

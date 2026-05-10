@@ -94,6 +94,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("list", help="list saved scans")
     sub.add_parser("interactive", help="open the interactive TUI")
+
+    sp_web = sub.add_parser("web", help="launch the browser-based UI")
+    sp_web.add_argument("--port", type=int, default=8000)
+    sp_web.add_argument("--no-browser", action="store_true",
+                        help="don't auto-open a browser")
     return p
 
 
@@ -235,6 +240,12 @@ def _cmd_interactive(args: argparse.Namespace) -> int:
     return main_menu(args.output_root)
 
 
+def _cmd_web(args: argparse.Namespace) -> int:
+    from .webapp import serve_app
+    serve_app(args.output_root, port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cmd = args.command or "interactive"
@@ -243,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         "view": _cmd_view,
         "list": _cmd_list,
         "interactive": _cmd_interactive,
+        "web": _cmd_web,
     }
     return dispatch[cmd](args)
 

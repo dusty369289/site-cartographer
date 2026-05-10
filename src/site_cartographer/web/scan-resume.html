@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>resume scan · site-cartographer</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<nav class="topbar">
+  <span class="brand">site-cartographer</span>
+  <a href="/">home</a>
+  <a href="/scans">saved scans</a>
+  <a href="/scan-new">new scan</a>
+  <a href="/scan-resume" class="active">resume</a>
+  <span class="spacer"></span>
+</nav>
+
+<main>
+  <h1>resume scan</h1>
+  <div id="picker"></div>
+  <div id="form-area" style="display:none;"></div>
+</main>
+
+<script type="module">
+import { api, escapeHtml, fmtTime } from "/static/app.js";
+
+const params = new URLSearchParams(location.search);
+const initialName = params.get("name");
+
+function bumps(haltReason, droppedDepth, pages, depth, size) {
+  let p = pages, d = depth, s = size;
+  const r = haltReason || "";
+  if (r.includes("max-pages")) p = pages * 2;
+  if (r.includes("max-file-size") && size) s = size * 2;
+  if (droppedDepth > 0) d = depth * 2;
+  return [p, d, s];
+}
+
+async function showPicker() {
+  const scans = (await api("/api/scans")).filter(s => s.is_resumable && !s.running);
+  const root = document.getElementById("picker");
+  if (scans.length === 0) {
+    root.innerHTML = `<p style="color:var(--fg-faint);">nothing to resume.</p>`;
+    return;
+  }
+  root.innerHTML = `<table class="scans"><thead><tr>
+    <th>name</th><th>started</th><th>archived</th><th>queue</th><th>halt reason</th><th></th>
+  </tr></thead><tbody>` + scans.map(s => `
+    <tr>
+      <td><strong>${escapeHtml(s.display_name)}</strong></td>
+      <td>${escapeHtml(fmtTime(s.started_at))}</td>
+      <td>${s.archived_count}</td>
+      <td>${s.queue_depth}</td>
+      <td style="font-size:11px;color:var(--fg-dim);">${escapeHtml(s.halt_reason || "interrupted")}</td>
+      <td class="actions">
+        <a class="btn primary" href="/scan-resume?name=${encodeURIComponent(s.name)}">resume</a>
+      </td>
+    </tr>
+  `).join("") + `</tbody></table>`;
+}
+
+async function showForm(name) {
+  document.getElementById("picker").style.display = "none";
+  const area = document.getElementById("form-area");
+  area.style.display = "block";
+  area.innerHTML = `<p style="color:var(--fg-faint);">loading…</p>`;
+
+  let info;
+  try { info = await api(`/api/scans/${encodeURIComponent(name)}/config`); }
+  catch (e) { area.innerHTML = `<p style="color:var(--danger);">${escapeHtml(e.message)}</p>`; return; }
+
+  const cfg = info.config || {};
+  const dropped = info.dropped_for_depth || 0;
+  const halt = info.halt_reason;
+  const curPages = +cfg.max_pages || 100;
+  const curDepth = +cfg.max_depth || 15;
+  const curSize = cfg.max_file_size || null;
+  const [sugPages, sugDepth, sugSize] = bumps(halt, dropped, curPages, curDepth, curSize);
+
+  const sizeFmt = (b) => {
+    if (!b) return "";
+    if (b >= 1024 ** 3) return (b / 1024 ** 3).toFixed(1) + "GB";
+    if (b >= 1024 ** 2) return (b / 1024 ** 2).toFixed(1) + "MB";
+    if (b >= 1024) return (b / 1024).toFixed(1) + "KB";
+    return b + "B";
+  };
+
+  area.innerHTML = `
+    <div class="card" style="background:#1f2229;border-color:#2a2e36;color:var(--fg-dim);font-size:12px;margin-bottom:12px;">
+      <strong style="color:var(--fg);">${escapeHtml(cfg.name || name)}</strong> &mdash; ${escapeHtml(cfg.start_url || "")}<br/>
+      previous halt: ${escapeHtml(halt || "interrupted")}${dropped > 0 ? ` &middot; ${dropped} URLs dropped for depth` : ""}
+    </div>
+    <form id="resume-form" class="card">
+      <div class="row">
+        <div class="field"><label>max pages (was ${curPages})</label>
+          <input type="number" name="max_pages" value="${sugPages}" min="1" />
+          ${sugPages !== curPages ? `<div class="help">suggested: ${sugPages}</div>` : ""}
+        </div>
+        <div class="field"><label>max depth (was ${curDepth})</label>
+          <input type="number" name="max_depth" value="${sugDepth}" min="1" />
+          ${sugDepth !== curDepth ? `<div class="help">suggested: ${sugDepth} (depth was limiting)</div>` : ""}
+        </div>
+        <div class="field"><label>max archive size (was ${sizeFmt(curSize) || "unlimited"})</label>
+          <input type="text" name="max_file_size" value="${sizeFmt(sugSize)}" placeholder="blank = unlimited" />
+        </div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label>parallel workers</label>
+          <input type="number" name="parallel_workers" value="${+cfg.parallel_workers || 1}" min="1" max="8" />
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit" class="primary">resume</button>
+        <a class="btn" href="/scan-resume">cancel</a>
+      </div>
+      <div id="form-error" style="color:var(--danger); margin-top:10px; display:none;"></div>
+    </form>
+  `;
+
+  document.getElementById("resume-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const fd = new FormData(ev.target);
+    const payload = {
+      start_url: cfg.start_url,
+      name: cfg.name,
+      max_pages: +fd.get("max_pages"),
+      max_depth: +fd.get("max_depth"),
+      max_file_size: fd.get("max_file_size"),
+      parallel_workers: +fd.get("parallel_workers"),
+      delay_ms: +cfg.delay_ms || 250,
+      page_timeout_ms: +cfg.page_timeout_ms || 30000,
+      include_subdomains: !!cfg.include_subdomains,
+      respect_robots: !!cfg.respect_robots,
+      external_policy: cfg.external_policy || "metadata",
+    };
+    const errBox = document.getElementById("form-error");
+    errBox.style.display = "none";
+    try {
+      const res = await api(`/api/scans/${encodeURIComponent(name)}/resume`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      window.location.href = res.redirect;
+    } catch (e) {
+      errBox.textContent = e.message;
+      errBox.style.display = "block";
+    }
+  });
+}
+
+if (initialName) { showForm(initialName); } else { showPicker(); }
+</script>
+</body>
+</html>

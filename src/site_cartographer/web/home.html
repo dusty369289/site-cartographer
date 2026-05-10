@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>site-cartographer</title>
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<nav class="topbar">
+  <span class="brand">site-cartographer</span>
+  <a href="/" class="active">home</a>
+  <a href="/scans">saved scans</a>
+  <a href="/scan-new">new scan</a>
+  <a href="/scan-resume">resume</a>
+  <span class="spacer"></span>
+  <span style="font-size:12px;color:var(--fg-faint);" id="server-info"></span>
+</nav>
+
+<main>
+  <h1>welcome</h1>
+  <p>crawl a website, archive each page, and explore the link graph.</p>
+
+  <div class="menu-grid" style="margin-top:18px;">
+    <a class="tile" href="/scan-new">
+      <div class="tile-title">new scan</div>
+      <div class="tile-desc">point the crawler at a URL and configure depth, page caps, parallel workers, external-link policy, and more.</div>
+    </a>
+    <a class="tile" href="/scan-resume">
+      <div class="tile-title">resume scan</div>
+      <div class="tile-desc">continue an unfinished crawl. suggested cap bumps adapt to whatever halted the previous run.</div>
+    </a>
+    <a class="tile" href="/scans">
+      <div class="tile-title">saved scans</div>
+      <div class="tile-desc">browse all completed and paused scans. open the visual graph viewer or delete scans you don't need.</div>
+    </a>
+  </div>
+
+  <h3 style="margin-top:32px;">recent scans</h3>
+  <div id="recent-scans"></div>
+</main>
+
+<script type="module">
+import { api, fmtBytes, statusBadge, fmtTime, escapeHtml } from "/static/app.js";
+const recent = document.getElementById("recent-scans");
+try {
+  const scans = await api("/api/scans");
+  if (scans.length === 0) {
+    recent.innerHTML = `<p style="color:var(--fg-faint);">no scans yet — start one above.</p>`;
+  } else {
+    const top = scans.slice(0, 5);
+    recent.innerHTML = `<table class="scans"><thead><tr>
+      <th>name</th><th>status</th><th>url</th><th>archived</th><th>size</th><th></th>
+    </tr></thead><tbody>` + top.map(s => `
+      <tr>
+        <td><strong>${escapeHtml(s.display_name)}</strong></td>
+        <td>${statusBadge(s)}</td>
+        <td class="url">${escapeHtml(s.url || "")}</td>
+        <td>${s.archived_count}</td>
+        <td>${escapeHtml(s.total_bytes_human)}</td>
+        <td class="actions"><a class="btn" href="/scans/${encodeURIComponent(s.name)}/">view</a></td>
+      </tr>
+    `).join("") + `</tbody></table>`;
+  }
+} catch (e) {
+  recent.innerHTML = `<p style="color:var(--danger);">${escapeHtml(e.message)}</p>`;
+}
+</script>
+</body>
+</html>
