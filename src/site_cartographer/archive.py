@@ -96,11 +96,18 @@ class RunSummary:
     page_count: int
     archived_count: int
     edge_count: int
+    queue_depth: int
     total_bytes: int
 
     @property
     def display_name(self) -> str:
         return self.name or self.dir.name
+
+    @property
+    def is_resumable(self) -> bool:
+        """True if this run has unfinished work — either it never finalised
+        (Ctrl+C / crash) or it halted by a cap with pending items still queued."""
+        return self.finished_at is None or self.queue_depth > 0
 
 
 def list_runs(base_dir: Path) -> list[RunSummary]:
@@ -137,7 +144,7 @@ def _summarise_run(run_dir: Path, db: Path) -> RunSummary:
             f"SELECT {', '.join(select_cols)} FROM runs ORDER BY id DESC LIMIT 1"
         ).fetchone()
         if run_row is None:
-            page_count = archived_count = edge_count = 0
+            page_count = archived_count = edge_count = queue_depth = 0
         else:
             page_count = conn.execute(
                 "SELECT COUNT(*) FROM pages WHERE run_id = ?", (run_row["id"],)
@@ -148,6 +155,9 @@ def _summarise_run(run_dir: Path, db: Path) -> RunSummary:
             ).fetchone()[0]
             edge_count = conn.execute(
                 "SELECT COUNT(*) FROM edges WHERE run_id = ?", (run_row["id"],)
+            ).fetchone()[0]
+            queue_depth = conn.execute(
+                "SELECT COUNT(*) FROM pending WHERE run_id = ?", (run_row["id"],)
             ).fetchone()[0]
     finally:
         conn.close()
@@ -171,5 +181,6 @@ def _summarise_run(run_dir: Path, db: Path) -> RunSummary:
         page_count=page_count,
         archived_count=archived_count,
         edge_count=edge_count,
+        queue_depth=queue_depth,
         total_bytes=dir_size(run_dir),
     )

@@ -142,7 +142,11 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         with RichProgressReporter(console) as reporter:
             asyncio.run(crawl(config, progress=reporter))
     except KeyboardInterrupt:
-        console.print("[yellow]interrupted by user[/yellow]")
+        console.print(
+            "[yellow]paused.[/yellow]"
+            f" resume with: [cyan]site-cartographer scan {config.start_url}"
+            f" --resume {output_dir}[/cyan]"
+        )
         return 130
 
     _install_viewer(output_dir)

@@ -125,12 +125,19 @@ class BrowserSession:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
-        if self._context is not None:
-            await self._context.close()
-        if self._browser is not None:
-            await self._browser.close()
-        if self._playwright is not None:
-            await self._playwright.stop()
+        # Wrap each shutdown step so an error during cancel-driven cleanup
+        # never shadows the original exception (e.g. KeyboardInterrupt).
+        for closer in (
+            self._context and self._context.close,
+            self._browser and self._browser.close,
+            self._playwright and self._playwright.stop,
+        ):
+            if closer is None:
+                continue
+            try:
+                await closer()
+            except Exception as e:
+                logger.debug("browser cleanup: %s", e)
 
     @asynccontextmanager
     async def open_page(self, url: str, *, timeout_ms: int) -> AsyncIterator[PageHandle]:

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
+import sqlite3
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -52,28 +54,42 @@ def _banner() -> None:
 
 
 def main_menu(output_root: Path) -> int:
-    """Top-level interactive loop. Returns process exit code."""
+    """Top-level interactive loop. Returns process exit code.
+
+    Ctrl+C at any prompt returns to the main menu; Ctrl+C at the main menu
+    quits cleanly. While a scan is running, Ctrl+C halts it safely (the run
+    becomes resumable).
+    """
     while True:
         _banner()
-        choice = questionary.select(
-            "what would you like to do?",
-            choices=[
-                "scan a new site",
-                "view a saved scan",
-                "list saved scans",
-                "quit",
-            ],
-            style=_QUESTIONARY_STYLE,
-        ).ask()
+        try:
+            choice = questionary.select(
+                "what would you like to do?",
+                choices=[
+                    "scan a new site",
+                    "resume an unfinished scan",
+                    "view a saved scan",
+                    "list saved scans",
+                    "quit",
+                ],
+                style=_QUESTIONARY_STYLE,
+            ).ask()
+        except KeyboardInterrupt:
+            choice = None
         if choice is None or choice == "quit":
             console.print("[dim]bye[/dim]")
             return 0
-        if choice == "scan a new site":
-            _interactive_scan(output_root)
-        elif choice == "view a saved scan":
-            _interactive_view(output_root)
-        elif choice == "list saved scans":
-            _print_runs_table(list_runs(output_root))
+        try:
+            if choice == "scan a new site":
+                _interactive_scan(output_root)
+            elif choice == "resume an unfinished scan":
+                _interactive_resume(output_root)
+            elif choice == "view a saved scan":
+                _interactive_view(output_root)
+            elif choice == "list saved scans":
+                _print_runs_table(list_runs(output_root))
+        except KeyboardInterrupt:
+            console.print("\n[yellow]returned to menu[/yellow]")
 
 
 def _print_runs_table(runs: list[RunSummary]) -> None:
@@ -108,39 +124,45 @@ def _print_runs_table(runs: list[RunSummary]) -> None:
 
 _INVALID_NAME_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
+# Sentinel for "back" choices in questionary selectors. We can't use None
+# because questionary substitutes the title for the value when value is None.
+_BACK = object()
+
 
 def _slugify_name(name: str) -> str:
     return _INVALID_NAME_RE.sub("-", name.strip()).strip("-") or "scan"
 
 
 def _interactive_scan(output_root: Path) -> None:
+    s = _QUESTIONARY_STYLE
     answers = questionary.form(
         url=questionary.text(
             "start URL:",
             validate=lambda v: v.startswith(("http://", "https://"))
             or "must start with http:// or https://",
+            style=s,
         ),
         name=questionary.text(
             "name for this scan (optional, used for the directory):",
-            default="",
+            default="", style=s,
         ),
-        max_pages=questionary.text("max pages:", default="100"),
-        max_depth=questionary.text("max depth:", default="15"),
+        max_pages=questionary.text("max pages:", default="100", style=s),
+        max_depth=questionary.text("max depth:", default="15", style=s),
         max_size=questionary.text(
             "max archive size (e.g. 500MB, 2GB; blank = unlimited):",
-            default="",
+            default="", style=s,
         ),
-        delay_ms=questionary.text("delay between requests (ms):", default="250"),
+        delay_ms=questionary.text("delay between requests (ms):", default="250", style=s),
         include_subdomains=questionary.confirm(
-            "include subdomains?", default=False
+            "include subdomains?", default=False, style=s,
         ),
         respect_robots=questionary.confirm(
-            "respect robots.txt?", default=False
+            "respect robots.txt?", default=False, style=s,
         ),
         headed=questionary.confirm(
-            "show browser window (debug)?", default=False
+            "show browser window (debug)?", default=False, style=s,
         ),
-    ).ask(style=_QUESTIONARY_STYLE)
+    ).ask()
     if answers is None:
         return  # user cancelled
 
@@ -177,8 +199,119 @@ def _interactive_scan(output_root: Path) -> None:
         with RichProgressReporter(console) as reporter:
             asyncio.run(crawl(config, progress=reporter))
     except KeyboardInterrupt:
-        console.print("[yellow]interrupted by user[/yellow]")
+        console.print(
+            "[yellow]paused.[/yellow]"
+            " resume from the main menu when you're ready."
+        )
     _post_crawl(output_dir)
+
+
+def _load_run_config(run_dir: Path) -> dict:
+    """Deserialise the stored config_json from the latest run in *run_dir*."""
+    db = run_dir / "crawl.sqlite"
+    conn = sqlite3.connect(db)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT config_json FROM runs ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {}
+    try:
+        return json.loads(row["config_json"])
+    except Exception:
+        return {}
+
+
+def _interactive_resume(output_root: Path) -> None:
+    runs = [r for r in list_runs(output_root) if r.is_resumable]
+    if not runs:
+        console.print(
+            "[dim]nothing to resume — all scans are either finished and queue-empty,"
+            " or there are no scans yet.[/dim]"
+        )
+        return
+
+    choices = []
+    for r in runs:
+        when = (r.started_at or "")[:16]
+        reason = r.halt_reason or ("interrupted" if r.finished_at is None else "")
+        label = (
+            f"  {r.display_name:<30}  {when}  "
+            f"archived {r.archived_count}  queue {r.queue_depth}"
+            + (f"  [{reason[:25]}]" if reason else "")
+        )
+        choices.append(questionary.Choice(title=label, value=r))
+    choices.append(questionary.Choice(title="< back", value=_BACK))
+
+    selected = questionary.select(
+        "select an unfinished scan to resume:",
+        choices=choices, style=_QUESTIONARY_STYLE,
+    ).ask()
+    if selected is None or selected is _BACK:
+        return
+
+    existing = _load_run_config(selected.dir)
+    cur_max_pages = int(existing.get("max_pages") or 100)
+    cur_max_depth = int(existing.get("max_depth") or 15)
+    cur_max_size = existing.get("max_file_size")
+    cur_size_str = format_size(cur_max_size) if cur_max_size else ""
+
+    suggested_pages = cur_max_pages + max(50, cur_max_pages)
+
+    s = _QUESTIONARY_STYLE
+    answers = questionary.form(
+        max_pages=questionary.text(
+            f"max pages (was {cur_max_pages}, suggesting {suggested_pages}):",
+            default=str(suggested_pages), style=s,
+        ),
+        max_depth=questionary.text(
+            f"max depth (was {cur_max_depth}):",
+            default=str(cur_max_depth), style=s,
+        ),
+        max_size=questionary.text(
+            f"max archive size (was {cur_size_str or 'unlimited'}; blank = unlimited):",
+            default=cur_size_str, style=s,
+        ),
+    ).ask()
+    if answers is None:
+        return
+
+    try:
+        new_size = parse_size(answers["max_size"]) if answers["max_size"].strip() else None
+    except ValueError as e:
+        console.print(f"[red]bad size:[/red] {e}")
+        return
+
+    config = CrawlConfig(
+        start_url=existing.get("start_url", selected.start_url or ""),
+        output_dir=selected.dir,
+        name=existing.get("name") or selected.name,
+        max_pages=int(answers["max_pages"]),
+        max_depth=int(answers["max_depth"]),
+        max_file_size=new_size,
+        delay_ms=int(existing.get("delay_ms") or 250),
+        page_timeout_ms=int(existing.get("page_timeout_ms") or 30000),
+        include_subdomains=bool(existing.get("include_subdomains")),
+        respect_robots=bool(existing.get("respect_robots")),
+        user_agent=existing.get("user_agent") or f"site-cartographer/{__version__}",
+        viewport=tuple(existing.get("viewport") or [320, 240]),
+        headless=True,
+        resume=True,
+    )
+
+    console.print(f"\n[dim]→ resuming[/dim] [cyan]{selected.dir}[/cyan]\n")
+    try:
+        with RichProgressReporter(console) as reporter:
+            asyncio.run(crawl(config, progress=reporter))
+    except KeyboardInterrupt:
+        console.print(
+            "[yellow]paused.[/yellow]"
+            " resume from the main menu when you're ready."
+        )
+    _post_crawl(selected.dir)
 
 
 def _post_crawl(run_dir: Path) -> None:
@@ -213,12 +346,12 @@ def _interactive_view(output_root: Path) -> None:
         status = "✓" if r.finished_at else "…"
         label = f"{status} {r.display_name:<40}  {when}  {r.archived_count} pages  {size}"
         choices.append(questionary.Choice(title=label, value=r))
-    choices.append(questionary.Choice(title="< back", value=None))
+    choices.append(questionary.Choice(title="< back", value=_BACK))
 
     selected = questionary.select(
         "select a scan to view:", choices=choices, style=_QUESTIONARY_STYLE,
     ).ask()
-    if selected is None:
+    if selected is None or selected is _BACK:
         return
 
     port = 8000

@@ -100,7 +100,8 @@ class RichProgressReporter(ProgressReporter):
             now_line,
             Text("recent:", style="bold dim"),
             recent,
-            Text(self.halt_msg, style="bold yellow") if self.halt_msg else Text(""),
+            Text(self.halt_msg, style="bold yellow") if self.halt_msg
+            else Text("Ctrl+C to pause safely (resumable)", style="dim"),
         )
         return Panel(body, title=title, border_style="cyan")
 

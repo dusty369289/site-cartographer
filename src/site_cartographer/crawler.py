@@ -144,12 +144,22 @@ def _migrate(conn: sqlite3.Connection) -> None:
 def start_run(conn: sqlite3.Connection, config: CrawlConfig) -> int:
     start_canonical = canonicalize(config.start_url)
     if config.resume:
+        # Find the latest run for this start URL regardless of finished status.
+        # Capped runs have finished_at set but may still have pending items;
+        # interrupted runs have finished_at NULL. Either is resumable.
         row = conn.execute(
-            "SELECT id FROM runs WHERE start_url_canonical = ? AND finished_at IS NULL"
+            "SELECT id, finished_at FROM runs WHERE start_url_canonical = ?"
             " ORDER BY id DESC LIMIT 1",
             (start_canonical,),
         ).fetchone()
         if row is not None:
+            if row["finished_at"] is not None:
+                conn.execute(
+                    "UPDATE runs SET finished_at = NULL, halt_reason = NULL"
+                    " WHERE id = ?",
+                    (row["id"],),
+                )
+                conn.commit()
             logger.info("resuming run %s", row["id"])
             return row["id"]
     cursor = conn.execute(
@@ -196,6 +206,7 @@ async def crawl(config: CrawlConfig,
     layout = ensure_run_dirs(config.output_dir)
     conn = open_db(layout["db"])
     halt_reason: str | None = None
+    run_id: int | None = None
     try:
         run_id = start_run(conn, config)
         start_canonical = canonicalize(config.start_url)
@@ -203,29 +214,47 @@ async def crawl(config: CrawlConfig,
             run_id=run_id, start_url=config.start_url,
             max_pages=config.max_pages, max_size=config.max_file_size,
         )
-        async with BrowserSession(
-            headless=config.headless,
-            viewport=config.viewport,
-            user_agent=config.user_agent,
-        ) as browser:
-            halt_reason = await _crawl_loop(
-                conn, run_id, browser, config, start_canonical, progress,
-            )
-        archived = conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE run_id = ? AND archive_path IS NOT NULL",
-            (run_id,),
-        ).fetchone()[0]
-        total = conn.execute(
-            "SELECT COUNT(*) FROM pages WHERE run_id = ?", (run_id,),
-        ).fetchone()[0]
-        edges = conn.execute(
-            "SELECT COUNT(*) FROM edges WHERE run_id = ?", (run_id,),
-        ).fetchone()[0]
-        finalise_run(conn, run_id, halt_reason)
-        progress.on_finish(archived_count=archived, total_pages=total, edges=edges)
+        try:
+            async with BrowserSession(
+                headless=config.headless,
+                viewport=config.viewport,
+                user_agent=config.user_agent,
+            ) as browser:
+                halt_reason = await _crawl_loop(
+                    conn, run_id, browser, config, start_canonical, progress,
+                )
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            # Always mark the run as interrupted before unwinding so a
+            # subsequent resume picks up cleanly. The pending queue is
+            # already safe — every iteration commits before sleeping.
+            halt_reason = "interrupted by user"
+            progress.on_halt(halt_reason)
+            _finalise_with_progress(conn, run_id, halt_reason, progress)
+            raise
+        _finalise_with_progress(conn, run_id, halt_reason, progress)
     finally:
         conn.close()
     return layout["root"]
+
+
+def _finalise_with_progress(
+    conn: sqlite3.Connection,
+    run_id: int,
+    halt_reason: str | None,
+    progress: ProgressReporter,
+) -> None:
+    archived = conn.execute(
+        "SELECT COUNT(*) FROM pages WHERE run_id = ? AND archive_path IS NOT NULL",
+        (run_id,),
+    ).fetchone()[0]
+    total = conn.execute(
+        "SELECT COUNT(*) FROM pages WHERE run_id = ?", (run_id,),
+    ).fetchone()[0]
+    edges = conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE run_id = ?", (run_id,),
+    ).fetchone()[0]
+    finalise_run(conn, run_id, halt_reason)
+    progress.on_finish(archived_count=archived, total_pages=total, edges=edges)
 
 
 async def _crawl_loop(
