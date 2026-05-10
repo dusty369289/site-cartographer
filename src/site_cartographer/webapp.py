@@ -342,6 +342,38 @@ async def api_events(request: web.Request) -> web.StreamResponse:
     return response
 
 
+async def api_save_layout(request: web.Request) -> web.Response:
+    """Persist a viewer-computed layout (positions + params) to layout.json
+    inside the run dir, so the next viewer load uses it as a starting point."""
+    name = request.match_info["name"]
+    output_root: Path = request.app["output_root"]
+    base = (output_root / name).resolve()
+    if not base.is_dir() or not (base / "crawl.sqlite").is_file():
+        return web.json_response({"error": "not found"}, status=404)
+    payload = await request.json()
+    if not isinstance(payload, dict) or "positions" not in payload:
+        return web.json_response({"error": "missing positions"}, status=400)
+    payload["saved_at"] = datetime.utcnow().isoformat() + "Z"
+    payload.setdefault("version", 1)
+    out = base / "layout.json"
+    out.write_text(json.dumps(payload), encoding="utf-8")
+    return web.json_response({"ok": True, "saved_at": payload["saved_at"]})
+
+
+async def api_clear_layout(request: web.Request) -> web.Response:
+    name = request.match_info["name"]
+    output_root: Path = request.app["output_root"]
+    target = (output_root / name / "layout.json").resolve()
+    base = (output_root / name).resolve()
+    try:
+        target.relative_to(base)
+    except ValueError:
+        raise web.HTTPForbidden()
+    if target.is_file():
+        target.unlink()
+    return web.json_response({"ok": True})
+
+
 async def serve_run_file(request: web.Request) -> web.StreamResponse:
     """Serve a file from a run dir at /scans/{name}/{path}.
 
@@ -391,6 +423,8 @@ def make_app(output_root: Path) -> web.Application:
     app.router.add_delete("/api/scans/{name}", api_delete_scan)
     app.router.add_get("/api/scans/{name}/config", api_scan_config)
     app.router.add_get("/api/scans/{name}/events", api_events)
+    app.router.add_post("/api/scans/{name}/layout", api_save_layout)
+    app.router.add_delete("/api/scans/{name}/layout", api_clear_layout)
 
     app.router.add_static("/static", WEB_DIR)
     app.router.add_get("/scans/{name}", serve_run_file)

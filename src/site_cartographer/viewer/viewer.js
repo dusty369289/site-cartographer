@@ -33,12 +33,22 @@
   const imageCache = new Map();
   const communityColors = new Map();
 
-  fetch(RUN_BASE + "graph.json")
-    .then((r) => {
+  function getScanName() {
+    const m = window.location.pathname.match(/\/scans\/([^/]+)\//);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  const SCAN_NAME = getScanName();
+
+  Promise.all([
+    fetch(RUN_BASE + "graph.json").then((r) => {
       if (!r.ok) throw new Error("graph.json: HTTP " + r.status);
       return r.json();
-    })
-    .then(initGraph)
+    }),
+    fetch(RUN_BASE + "layout.json")
+      .then((r) => (r.ok ? r.json() : null))
+      .catch(() => null),
+  ])
+    .then(([graphData, layoutData]) => initGraph(graphData, layoutData))
     .catch((err) => {
       document.getElementById("panel-title").textContent =
         "viewer error: " + err.message;
@@ -54,7 +64,7 @@
     return COLORS.unvisited;
   }
 
-  function initGraph(data) {
+  function initGraph(data, savedLayout) {
     graph = new Graph({ multi: false, type: "undirected" });
 
     outgoingByPage = new Map();
@@ -68,15 +78,24 @@
       incomingByPage.get(e.target).push(e);
     }
 
-    // Seed nodes in a small random circle so d3-force has something to relax.
+    // Apply saved positions where available, otherwise seed a small random
+    // circle so d3-force has something to relax if we end up running it.
+    const positions = (savedLayout && savedLayout.positions) || {};
     const seedR = Math.sqrt(data.nodes.length) * 25;
+    let unmatched = 0;
     for (const n of data.nodes) {
-      const angle = Math.random() * Math.PI * 2;
-      const r = Math.random() * seedR;
+      const saved = positions[n.id];
+      let x, y;
+      if (saved && saved.length >= 2) {
+        x = saved[0]; y = saved[1];
+      } else {
+        const angle = Math.random() * Math.PI * 2;
+        const r = Math.random() * seedR;
+        x = Math.cos(angle) * r; y = Math.sin(angle) * r;
+        unmatched++;
+      }
       graph.addNode(n.id, {
-        x: Math.cos(angle) * r,
-        y: Math.sin(angle) * r,
-        size: 4,
+        x: x, y: y, size: 4,
         label: shortLabel(n),
         color: pickColor(n),
         _raw: n,
@@ -138,8 +157,70 @@
     bindPanelResize();
     setupOverlayCanvas();
 
-    // Kick off the initial layout.
-    runLayout(readParams());
+    // If we have a saved layout that covered (most of) the graph, just use
+    // it; otherwise run the initial computation. The user can always click
+    // "re-compute layout" to re-run with current sliders.
+    const allMatched = unmatched === 0;
+    const mostlyMatched = data.nodes.length === 0 ||
+      (data.nodes.length - unmatched) / data.nodes.length > 0.85;
+    if (savedLayout && savedLayout.params) {
+      applySavedParams(savedLayout.params);
+    }
+    if (savedLayout && allMatched) {
+      // Use stored positions verbatim; nothing to compute.
+      const loader = document.getElementById("cy-loading");
+      if (loader) loader.style.display = "none";
+      annotateLoadedFromSave(savedLayout, /*partial*/ false);
+      drawThumbnailOverlay();
+    } else if (savedLayout && mostlyMatched) {
+      // New nodes appeared since the save. Use saved positions where possible
+      // but run a relaxation pass to integrate the strangers.
+      annotateLoadedFromSave(savedLayout, /*partial*/ true, unmatched);
+      runLayout(readParams());
+    } else {
+      runLayout(readParams());
+    }
+  }
+
+  function applySavedParams(p) {
+    const set = (id, val) => {
+      const el = document.getElementById(id);
+      if (el != null && val != null) {
+        el.value = String(val);
+        el.dispatchEvent(new Event("input"));
+      }
+    };
+    set("param-link-distance", p.linkDistance);
+    set("param-charge", typeof p.charge === "number" ? Math.abs(p.charge) : p.charge);
+    set("param-collide", p.collide);
+    set("param-center", p.centerStrength != null ? p.centerStrength * 100 : null);
+    set("param-decay", p.alphaDecay != null ? p.alphaDecay * 1000 : null);
+    set("param-cluster", p.clusterStrength != null ? p.clusterStrength * 100 : null);
+    set("param-hub-soften", p.hubSoften != null ? p.hubSoften * 100 : null);
+  }
+
+  function annotateLoadedFromSave(savedLayout, partial, unmatchedCount = 0) {
+    const stats = document.getElementById("stats");
+    if (!stats) return;
+    const ts = savedLayout.saved_at ? savedLayout.saved_at.slice(0, 19).replace("T", " ") : "?";
+    stats.innerHTML += ` · <span style="color:var(--accent-2);">layout loaded from save (${ts})${partial ? ` — ${unmatchedCount} new node(s) need relaxing` : ""}</span>`;
+  }
+
+  async function saveLayout(params) {
+    if (!SCAN_NAME) return;
+    const positions = {};
+    graph.forEachNode((id, attrs) => {
+      positions[id] = [Math.round(attrs.x * 100) / 100, Math.round(attrs.y * 100) / 100];
+    });
+    try {
+      await fetch(`/api/scans/${encodeURIComponent(SCAN_NAME)}/layout`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ params, positions }),
+      });
+    } catch (e) {
+      console.warn("failed to save layout:", e);
+    }
   }
 
   // ------------------------------------------------------------- communities
@@ -341,6 +422,8 @@
       setTimeout(() => { prog.style.display = "none"; }, 400);
       const loader = document.getElementById("cy-loading");
       if (loader) loader.style.display = "none";
+      // Persist the result so re-opening the viewer skips the recompute.
+      saveLayout(params);
     }
 
     step();
