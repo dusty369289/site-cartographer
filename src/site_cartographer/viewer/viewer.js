@@ -172,12 +172,23 @@
       if (loader) loader.style.display = "none";
       annotateLoadedFromSave(savedLayout, /*partial*/ false);
       drawThumbnailOverlay();
+      setLayoutStatus(
+        `loaded saved layout (${(savedLayout.saved_at || "").slice(0, 19).replace("T", " ")})`,
+        "#5fd97a",
+      );
+      console.log("[layout] using saved positions (full match)");
     } else if (savedLayout && mostlyMatched) {
       // New nodes appeared since the save. Use saved positions where possible
       // but run a relaxation pass to integrate the strangers.
       annotateLoadedFromSave(savedLayout, /*partial*/ true, unmatched);
+      console.log(`[layout] saved layout has ${unmatched} unmatched nodes; relaxing`);
       runLayout(readParams());
     } else {
+      if (savedLayout) {
+        console.log(`[layout] saved layout matched too few nodes (${data.nodes.length - unmatched}/${data.nodes.length}); recomputing fresh`);
+      } else {
+        console.log("[layout] no saved layout, computing fresh");
+      }
       runLayout(readParams());
     }
   }
@@ -206,20 +217,44 @@
     stats.innerHTML += ` · <span style="color:var(--accent-2);">layout loaded from save (${ts})${partial ? ` — ${unmatchedCount} new node(s) need relaxing` : ""}</span>`;
   }
 
+  function setLayoutStatus(text, color) {
+    const el = document.getElementById("layout-status");
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = color || "var(--fg-faint)";
+  }
+
   async function saveLayout(params) {
-    if (!SCAN_NAME) return;
+    if (!SCAN_NAME) {
+      setLayoutStatus("layout not saved (viewer not under /scans/{name}/)", "#d97a7a");
+      console.warn("[layout] no scan name in URL, save skipped");
+      return;
+    }
     const positions = {};
     graph.forEachNode((id, attrs) => {
       positions[id] = [Math.round(attrs.x * 100) / 100, Math.round(attrs.y * 100) / 100];
     });
+    setLayoutStatus("saving layout…");
     try {
-      await fetch(`/api/scans/${encodeURIComponent(SCAN_NAME)}/layout`, {
+      const res = await fetch(`/api/scans/${encodeURIComponent(SCAN_NAME)}/layout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ params, positions }),
       });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        const msg = `save failed: HTTP ${res.status} ${body.slice(0, 80)}`;
+        console.warn("[layout]", msg);
+        setLayoutStatus(msg, "#d97a7a");
+      } else {
+        const data = await res.json();
+        const ts = (data.saved_at || "").slice(11, 19);
+        console.log("[layout] saved", data);
+        setLayoutStatus(`layout saved at ${ts || "—"}`, "#5fd97a");
+      }
     } catch (e) {
-      console.warn("failed to save layout:", e);
+      console.warn("[layout] save error:", e);
+      setLayoutStatus(`save failed: ${e.message}`, "#d97a7a");
     }
   }
 
