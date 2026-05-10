@@ -135,6 +135,7 @@
     bindLayoutControls();
     bindHighlightControl();
     bindTabs();
+    bindPanelResize();
     setupOverlayCanvas();
 
     // Kick off the initial layout.
@@ -693,6 +694,61 @@
   }
 
   function cssEscape(s) { return window.CSS && CSS.escape ? CSS.escape(s) : s.replace(/[^a-zA-Z0-9_-]/g, "\\$&"); }
+
+  // ---------------------------------------------------------------- resizer
+  function bindPanelResize() {
+    const STORAGE_KEY = "siteCartographer_panelWidth";
+    const app = document.getElementById("app");
+    const divider = document.getElementById("divider");
+    if (!divider || !app) return;
+
+    const stored = parseInt(localStorage.getItem(STORAGE_KEY), 10);
+    if (!isNaN(stored) && stored >= 240 && stored <= window.innerWidth - 240) {
+      app.style.setProperty("--panel-w", stored + "px");
+    }
+
+    let dragging = false;
+
+    const onMove = (e) => {
+      if (!dragging) return;
+      const newW = Math.min(
+        Math.max(window.innerWidth - e.clientX, 240),
+        window.innerWidth - 240,
+      );
+      app.style.setProperty("--panel-w", newW + "px");
+      // Sigma listens to window resize for re-layout; piggyback on that.
+      window.dispatchEvent(new Event("resize"));
+    };
+
+    const onUp = () => {
+      if (!dragging) return;
+      dragging = false;
+      divider.classList.remove("dragging");
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      const w = parseInt(app.style.getPropertyValue("--panel-w"), 10);
+      if (!isNaN(w)) localStorage.setItem(STORAGE_KEY, String(w));
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+
+    divider.addEventListener("mousedown", (e) => {
+      dragging = true;
+      divider.classList.add("dragging");
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      e.preventDefault();
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
+
+    // Double-click to reset to default width.
+    divider.addEventListener("dblclick", () => {
+      app.style.removeProperty("--panel-w");
+      localStorage.removeItem(STORAGE_KEY);
+      window.dispatchEvent(new Event("resize"));
+    });
+  }
 
   function bindHighlightControl() {
     document.getElementById("toggle-highlights").addEventListener("change", (e) => {

@@ -5,7 +5,21 @@
 <title>site-cartographer viewer</title>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; font-family: system-ui, sans-serif; }
-  #app { display: grid; grid-template-columns: 1fr 480px; height: 100vh; }
+  #app {
+    display: grid;
+    grid-template-columns: 1fr 4px var(--panel-w, 480px);
+    height: 100vh;
+  }
+  #divider {
+    background: #2a2a2a;
+    cursor: col-resize;
+    transition: background 100ms;
+    position: relative;
+  }
+  #divider:hover, #divider.dragging { background: #6ab0ff; }
+  #divider::after {
+    content: ""; position: absolute; inset: 0 -3px;  /* widen hit area */
+  }
   #cy { background: #111; position: relative; overflow: hidden; }
   #thumbnail-overlay {
     position: absolute; inset: 0; pointer-events: none;
@@ -190,6 +204,8 @@
       </div>
     </div>
   </div>
+
+  <div id="divider" title="drag to resize"></div>
 
   <div id="panel">
     <div id="panel-header"><span id="panel-title">site-cartographer</span></div>
