@@ -10,7 +10,14 @@ from pathlib import Path
 
 from .archive import archive_path, dir_size, ensure_run_dirs, thumb_path
 from .browser import BrowserSession
-from .links import body_hash, canonicalize, extract_links, is_same_origin
+from .links import (
+    DEFAULT_EXTRACTORS,
+    KNOWN_EXTRACTORS,
+    body_hash,
+    canonicalize,
+    extract_links,
+    is_same_origin,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +91,7 @@ CREATE TABLE IF NOT EXISTS edges (
   run_id INTEGER NOT NULL,
   src_page_id INTEGER NOT NULL REFERENCES pages(id),
   dst_url_canonical TEXT NOT NULL,
-  link_kind TEXT NOT NULL CHECK(link_kind IN ('a','area')),
+  link_kind TEXT NOT NULL,
   link_text TEXT,
   coords_json TEXT,
   shape TEXT
@@ -125,6 +132,8 @@ class CrawlConfig:
     include_subdomains: bool = False
     respect_robots: bool = False
     external_policy: str = "metadata"
+    link_extractors: tuple[str, ...] = DEFAULT_EXTRACTORS
+    custom_link_regex: str | None = None
     user_agent: str = "site-cartographer/0.1 (+contact)"
     viewport: tuple[int, int] = (320, 240)
     headless: bool = True
@@ -141,6 +150,19 @@ class CrawlConfig:
                 f"parallel_workers must be between 1 and {MAX_WORKERS},"
                 f" got {self.parallel_workers}"
             )
+        # Coerce + validate extractors
+        ext = tuple(e.strip() for e in self.link_extractors if e and e.strip())
+        unknown = [e for e in ext if e not in KNOWN_EXTRACTORS]
+        if unknown:
+            raise ValueError(
+                f"unknown link extractor(s): {unknown}; "
+                f"valid: {list(KNOWN_EXTRACTORS)}"
+            )
+        if not ext:
+            ext = DEFAULT_EXTRACTORS
+        # Use object.__setattr__ to bypass dataclass frozen rules (we're not
+        # frozen but we built a normalised tuple).
+        object.__setattr__(self, "link_extractors", ext)
 
     def to_json_dict(self) -> dict:
         d = asdict(self)
@@ -187,6 +209,32 @@ def _migrate(conn: sqlite3.Connection) -> None:
     pending_cols = {r[1] for r in conn.execute("PRAGMA table_info(pending)").fetchall()}
     if "claimed_at" not in pending_cols:
         conn.execute("ALTER TABLE pending ADD COLUMN claimed_at TEXT")
+
+    # Drop the legacy CHECK(link_kind IN ('a','area')) constraint so new
+    # extractor kinds (iframe, form, etc.) can be inserted into older DBs.
+    edges_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='edges'"
+    ).fetchone()
+    if edges_sql and "CHECK" in edges_sql[0] and "link_kind IN" in edges_sql[0]:
+        conn.executescript("""
+            CREATE TABLE edges_new (
+              id INTEGER PRIMARY KEY,
+              run_id INTEGER NOT NULL,
+              src_page_id INTEGER NOT NULL REFERENCES pages(id),
+              dst_url_canonical TEXT NOT NULL,
+              link_kind TEXT NOT NULL,
+              link_text TEXT,
+              coords_json TEXT,
+              shape TEXT
+            );
+            INSERT INTO edges_new SELECT id, run_id, src_page_id,
+              dst_url_canonical, link_kind, link_text, coords_json, shape
+              FROM edges;
+            DROP TABLE edges;
+            ALTER TABLE edges_new RENAME TO edges;
+            CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(run_id, src_page_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(run_id, dst_url_canonical);
+        """)
     conn.commit()
 
 
@@ -489,7 +537,11 @@ async def _fetch_external(
 
         if config.external_policy == "crawl":
             html = await ph.html()
-            for link in extract_links(html, base_url=final_url):
+            for link in extract_links(
+            html, base_url=final_url,
+            extractors=set(config.link_extractors),
+            custom_regex=config.custom_link_regex,
+        ):
                 coords_json: str | None = None
                 if link.kind == "area" and link.coords is not None:
                     coords_json = json.dumps({
@@ -778,7 +830,11 @@ async def _fetch_one(
             (rel_a, rel_t, page_id),
         )
 
-        for link in extract_links(html, base_url=final_url):
+        for link in extract_links(
+            html, base_url=final_url,
+            extractors=set(config.link_extractors),
+            custom_regex=config.custom_link_regex,
+        ):
             same_origin = is_same_origin(
                 link.url, start_canonical,
                 include_subdomains=config.include_subdomains,

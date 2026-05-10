@@ -137,6 +137,12 @@ def _build_config_from_payload(
     name = payload.get("name") or None
     max_size_raw = payload.get("max_file_size") or ""
     max_size = parse_size(max_size_raw) if str(max_size_raw).strip() else None
+    extractors = payload.get("link_extractors")
+    if isinstance(extractors, str):
+        extractors = [e.strip() for e in extractors.split(",") if e.strip()]
+    if not extractors:
+        from .links import DEFAULT_EXTRACTORS
+        extractors = list(DEFAULT_EXTRACTORS)
     return CrawlConfig(
         start_url=payload["start_url"],
         output_dir=output_dir,
@@ -150,6 +156,8 @@ def _build_config_from_payload(
         include_subdomains=bool(payload.get("include_subdomains", False)),
         respect_robots=bool(payload.get("respect_robots", False)),
         external_policy=payload.get("external_policy", "metadata"),
+        link_extractors=tuple(extractors),
+        custom_link_regex=payload.get("custom_link_regex") or None,
         viewport=tuple(payload.get("viewport", [320, 240])),
         headless=True,
         resume=resume,

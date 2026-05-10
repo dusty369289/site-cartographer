@@ -16,8 +16,20 @@ from . import __version__
 from .archive import RunSummary, format_size, list_runs, parse_size
 from .crawler import CrawlConfig, crawl
 from .graph import export_cytoscape_json
+from .links import ALL_EXTRACTORS, COMMON_EXTRACTORS, DEFAULT_EXTRACTORS
 from .progress import RichProgressReporter
 from .serve import serve
+
+
+def _parse_extractors(s: str) -> tuple[str, ...]:
+    s = s.strip().lower()
+    if s == "default" or s == "":
+        return DEFAULT_EXTRACTORS
+    if s == "common":
+        return COMMON_EXTRACTORS
+    if s == "all":
+        return ALL_EXTRACTORS
+    return tuple(p.strip() for p in s.split(",") if p.strip())
 
 console = Console()
 
@@ -63,6 +75,18 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
              "metadata: record edge + URL only (default). "
              "archive: also fetch & save the external page. "
              "crawl: archive AND extract its links (one hop only)",
+    )
+    p.add_argument(
+        "--link-extractors",
+        default="a,area",
+        help="comma-separated list of HTML link extractors to use. "
+             "valid: a,area,iframe,form,link,onclick,data_attrs,text_url. "
+             "shortcuts: 'default' (a,area), 'common' (default + iframe,form,data_attrs), 'all'",
+    )
+    p.add_argument(
+        "--link-regex", default=None,
+        help="optional regex run against raw HTML; first capture group "
+             "(or the whole match) is treated as a URL",
     )
     p.add_argument("--user-agent", default=f"site-cartographer/{__version__}")
     p.add_argument("--resume", type=Path, default=None,
@@ -158,6 +182,8 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         include_subdomains=args.include_subdomains,
         respect_robots=args.respect_robots,
         external_policy=args.external_policy,
+        link_extractors=_parse_extractors(args.link_extractors),
+        custom_link_regex=args.link_regex,
         user_agent=args.user_agent,
         viewport=args.viewport,
         headless=not args.headed,

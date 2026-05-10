@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Rich Links</title>
+  <link rel="alternate" href="/feed.rss" type="application/rss+xml" />
+  <link rel="canonical" href="/canonical-here" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <a href="/about">About</a>
+  <iframe src="/widgets/embed-1"></iframe>
+  <frame src="/legacy-frame.htm"></frame>
+  <form action="/submit" method="post"><input type="submit" /></form>
+  <button onclick="window.location='/onclick-target'">go</button>
+  <div onclick="location.href = '/onclick-target-2'">go</div>
+  <a href="javascript:alert('x')">js skip</a>
+  <span data-href="/data-href-target">data attr</span>
+  <span data-url="/data-url-target">data attr 2</span>
+  <p>Visit https://text-url.example.com/page for more.</p>
+  <!-- comment with URL https://commented.example.com/ -->
+</body>
+</html>
