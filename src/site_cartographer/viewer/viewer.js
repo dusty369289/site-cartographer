@@ -27,20 +27,23 @@
       ...graph.edges,
     ];
 
-    // Pick a layout based on graph size. cose looks great but is O(n²) per
-    // iteration — too slow for >300 nodes. concentric grouped by depth is
-    // near-instant and still readable for large graphs.
+    // cose (force-directed) is the default — readable and shows clusters well.
+    // For very large graphs we shrink the iteration count so initial render
+    // stays under a few seconds; the user can click "re-layout" for a high
+    // quality pass anytime.
     const nodeCount = graph.nodes.length;
-    const layoutSpec = nodeCount > 300
-      ? {
-          name: "concentric",
-          concentric: (n) => -(n.data("depth") ?? 99),
-          levelWidth: () => 1,
-          minNodeSpacing: 25,
-          animate: false,
-          padding: 30,
-        }
-      : { name: "cose", animate: false, nodeRepulsion: 8000, idealEdgeLength: 100 };
+    const fastIter = nodeCount > 1500 ? 50 : nodeCount > 800 ? 150 : nodeCount > 300 ? 400 : 1000;
+    const layoutSpec = {
+      name: "cose",
+      animate: false,
+      randomize: true,
+      numIter: fastIter,
+      nodeRepulsion: () => 8000,
+      idealEdgeLength: () => 80,
+      gravity: 0.25,
+      nestingFactor: 1.2,
+      componentSpacing: 60,
+    };
 
     try {
       cy = cytoscape({
@@ -85,8 +88,8 @@
             style: { "background-color": "#522", "border-color": "#a66" },
           },
           {
-            selector: "node[?is_duplicate]",
-            style: { "border-color": "#88a", "border-style": "dashed", "opacity": 0.7 },
+            selector: "node[alias_count >= 1]",
+            style: { "border-color": "#6c6", "border-width": 2 },
           },
           {
             selector: "edge",
@@ -188,11 +191,11 @@
       return;
     }
 
-    if (data.is_duplicate) {
-      // Same body as another URL — show that URL's archive transparently,
-      // but tell the user what's going on.
+    if (data.alias_count) {
+      const aliasNote = ` · ${data.alias_count} alias` +
+        (data.alias_count === 1 ? "" : "es") + " (other URLs serving this content)";
       document.getElementById("panel-title").textContent =
-        (data.label || data.url) + "  (alias of already-archived page)";
+        (data.label || data.url) + aliasNote;
     }
 
     empty.style.display = "none";
@@ -314,6 +317,26 @@
     if (window.CSS && CSS.escape) return CSS.escape(s);
     return s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
   }
+
+  document.getElementById("relayout-btn").addEventListener("click", () => {
+    if (!cy) return;
+    const btn = document.getElementById("relayout-btn");
+    btn.disabled = true;
+    btn.textContent = "running cose…";
+    setTimeout(() => {
+      cy.layout({
+        name: "cose",
+        animate: false,
+        randomize: false,
+        numIter: 2000,
+        nodeRepulsion: () => 10000,
+        idealEdgeLength: () => 80,
+        gravity: 0.2,
+      }).run();
+      btn.disabled = false;
+      btn.textContent = "re-layout (high quality)";
+    }, 50);
+  });
 
   document.getElementById("toggle-highlights").addEventListener("change", (e) => {
     highlightsOn = e.target.checked;
