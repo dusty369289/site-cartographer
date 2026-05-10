@@ -66,9 +66,13 @@ async function load() {
       const tr = ev.target.closest("tr");
       const name = tr.dataset.name;
       const confirmed = window.prompt(
-        `Type the scan name to permanently delete it.\n\nname: ${name}`
+        `Permanently delete this scan and all its files?\n\nname: ${name}\n\nType DELETE to confirm:`
       );
-      if (confirmed !== name) return;
+      if (confirmed === null) return;
+      if (confirmed.trim() !== "DELETE") {
+        alert("Cancelled — type DELETE exactly to confirm.");
+        return;
+      }
       try {
         await api(`/api/scans/${encodeURIComponent(name)}`, { method: "DELETE" });
         await load();

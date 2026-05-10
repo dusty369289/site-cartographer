@@ -506,11 +506,11 @@ def _interactive_delete(output_root: Path) -> None:
         )
     )
     confirm_text = questionary.text(
-        f"to confirm, type the scan name '{selected.display_name}':",
+        "to confirm, type DELETE:",
         style=_QUESTIONARY_STYLE,
     ).ask()
-    if confirm_text is None or confirm_text.strip() != selected.display_name:
-        console.print("[yellow]cancelled — name didn't match[/yellow]")
+    if confirm_text is None or confirm_text.strip() != "DELETE":
+        console.print("[yellow]cancelled — confirmation did not match[/yellow]")
         return
 
     try:
