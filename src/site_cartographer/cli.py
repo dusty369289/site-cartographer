@@ -4,7 +4,6 @@ import argparse
 import asyncio
 import logging
 import shutil
-import sys
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +12,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from . import __version__
-from .archive import RunSummary, format_size, list_runs, parse_size
+from .archive import list_runs, parse_size
 from .crawler import CrawlConfig, crawl
 from .graph import export_cytoscape_json
 from .links import ALL_EXTRACTORS, COMMON_EXTRACTORS, DEFAULT_EXTRACTORS

@@ -106,7 +106,7 @@ output/omid-20260510-181122/
 pytest -q
 ```
 
-55 tests covering URL canonicalisation, image-map link extraction, body-hash dedupe, same-origin policy, size-string parsing, resume-suggestion logic, and `CrawlConfig` validation. No live network required.
+74 tests covering URL canonicalisation, link extraction (8 built-in extractor types + custom regex), body-hash dedupe, scope-mode policy (host / descendants / domain / regex), size-string parsing, resume-suggestion logic, and `CrawlConfig` validation. No live network required.
 
 ## Project layout
 

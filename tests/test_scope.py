@@ -1,7 +1,6 @@
 """Tests for scope-mode-aware origin matching (is_in_scope)."""
 from site_cartographer.links import is_in_scope
 
-
 BASE = "https://public.3net.dev/"
 
 

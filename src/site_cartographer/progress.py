@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -33,7 +32,7 @@ class RichProgressReporter(ProgressReporter):
 
     def __init__(self, console: Console | None = None, *, history: int = 8):
         self.console = console or Console()
-        self.history: Deque[Text] = deque(maxlen=history)
+        self.history: deque[Text] = deque(maxlen=history)
         self.start_url = ""
         self.run_id = 0
         self.max_pages = 0
@@ -56,7 +55,7 @@ class RichProgressReporter(ProgressReporter):
         self._task_id: int | None = None
         self._live: Live | None = None
 
-    def __enter__(self) -> "RichProgressReporter":
+    def __enter__(self) -> RichProgressReporter:
         self._live = Live(self._render(), console=self.console, refresh_per_second=4)
         self._live.__enter__()
         return self

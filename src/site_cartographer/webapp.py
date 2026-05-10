@@ -24,7 +24,7 @@ from .archive import (
     list_runs,
     parse_size,
 )
-from .crawler import EXTERNAL_POLICIES, MAX_WORKERS, CrawlConfig, ProgressReporter, crawl
+from .crawler import CrawlConfig, ProgressReporter, crawl
 from .graph import export_graph_json
 
 logger = logging.getLogger(__name__)
@@ -331,7 +331,7 @@ async def api_events(request: web.Request) -> web.StreamResponse:
     while True:
         try:
             event = await asyncio.wait_for(ctx.queue.get(), timeout=15.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             try:
                 await response.write(b": ping\n\n")
             except (ConnectionResetError, ConnectionAbortedError):

@@ -1,8 +1,6 @@
 """Tests for the pluggable link extractors."""
 from pathlib import Path
 
-import pytest
-
 from site_cartographer.links import (
     ALL_EXTRACTORS,
     COMMON_EXTRACTORS,

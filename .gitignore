@@ -89,6 +89,9 @@ playwright/.cache/
 .cookiejar
 cookies.txt
 
+# Claude Code per-project context (personal notes, not for public repos) ──────
+CLAUDE.md
+
 # Logs ────────────────────────────────────────────────────────────────────────
 *.log
 logs/
