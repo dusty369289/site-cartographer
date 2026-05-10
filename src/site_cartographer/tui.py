@@ -70,6 +70,7 @@ def main_menu(output_root: Path) -> int:
                     "resume an unfinished scan",
                     "view a saved scan",
                     "list saved scans",
+                    "delete a saved scan",
                     "quit",
                 ],
                 style=_QUESTIONARY_STYLE,
@@ -88,6 +89,8 @@ def main_menu(output_root: Path) -> int:
                 _interactive_view(output_root)
             elif choice == "list saved scans":
                 _print_runs_table(list_runs(output_root))
+            elif choice == "delete a saved scan":
+                _interactive_delete(output_root)
         except KeyboardInterrupt:
             console.print("\n[yellow]returned to menu[/yellow]")
 
@@ -133,6 +136,26 @@ def _slugify_name(name: str) -> str:
     return _INVALID_NAME_RE.sub("-", name.strip()).strip("-") or "scan"
 
 
+_EXTERNAL_CHOICES = [
+    questionary.Choice(
+        title="metadata only — record URL + edge, don't fetch (default)",
+        value="metadata",
+    ),
+    questionary.Choice(
+        title="archive — fetch & save the external page (no link extraction)",
+        value="archive",
+    ),
+    questionary.Choice(
+        title="crawl — archive AND extract its links (one hop only)",
+        value="crawl",
+    ),
+    questionary.Choice(
+        title="ignore — silently drop, externals don't show up at all",
+        value="ignore",
+    ),
+]
+
+
 def _interactive_scan(output_root: Path) -> None:
     s = _QUESTIONARY_STYLE
     answers = questionary.form(
@@ -154,13 +177,22 @@ def _interactive_scan(output_root: Path) -> None:
         ),
         delay_ms=questionary.text("delay between requests (ms):", default="250", style=s),
         include_subdomains=questionary.confirm(
-            "include subdomains?", default=False, style=s,
+            "also follow links to subdomains"
+            " (e.g. blog.foo.com when starting at foo.com)?"
+            " — `www.` is always treated as the same site either way",
+            default=False, style=s,
+        ),
+        external_policy=questionary.select(
+            "what to do with out-of-scope (external) links?",
+            choices=_EXTERNAL_CHOICES, default="metadata", style=s,
         ),
         respect_robots=questionary.confirm(
-            "respect robots.txt?", default=False, style=s,
+            "honour the site's /robots.txt disallow rules?",
+            default=False, style=s,
         ),
         headed=questionary.confirm(
-            "show browser window (debug)?", default=False, style=s,
+            "show the browser window while crawling (slower; useful for debug)?",
+            default=False, style=s,
         ),
     ).ask()
     if answers is None:
@@ -191,6 +223,7 @@ def _interactive_scan(output_root: Path) -> None:
         delay_ms=int(answers["delay_ms"]),
         include_subdomains=answers["include_subdomains"],
         respect_robots=answers["respect_robots"],
+        external_policy=answers["external_policy"],
         headless=not answers["headed"],
     )
 
@@ -296,6 +329,7 @@ def _interactive_resume(output_root: Path) -> None:
         page_timeout_ms=int(existing.get("page_timeout_ms") or 30000),
         include_subdomains=bool(existing.get("include_subdomains")),
         respect_robots=bool(existing.get("respect_robots")),
+        external_policy=existing.get("external_policy") or "metadata",
         user_agent=existing.get("user_agent") or f"site-cartographer/{__version__}",
         viewport=tuple(existing.get("viewport") or [320, 240]),
         headless=True,
@@ -331,6 +365,56 @@ def _post_crawl(run_dir: Path) -> None:
         "[dim]launch viewer:[/dim]"
         f" [cyan]python -m site_cartographer.serve {run_dir}[/cyan]"
     )
+
+
+def _interactive_delete(output_root: Path) -> None:
+    runs = list_runs(output_root)
+    if not runs:
+        console.print("[dim]no saved scans to delete[/dim]")
+        return
+
+    choices = []
+    for r in runs:
+        when = (r.started_at or "")[:16]
+        size = format_size(r.total_bytes)
+        label = f"  {r.display_name:<35}  {when}  {r.archived_count} pages  {size}"
+        choices.append(questionary.Choice(title=label, value=r))
+    choices.append(questionary.Choice(title="< back", value=_BACK))
+
+    selected = questionary.select(
+        "which scan to DELETE?",
+        choices=choices, style=_QUESTIONARY_STYLE,
+    ).ask()
+    if selected is None or selected is _BACK:
+        return
+
+    console.print(
+        Panel(
+            Text.from_markup(
+                f"[bold red]about to permanently delete:[/bold red]\n"
+                f"  {selected.dir}\n"
+                f"  {format_size(selected.total_bytes)} on disk,"
+                f" {selected.archived_count} archived pages,"
+                f" {selected.edge_count} edges\n\n"
+                f"[dim]all .html archives, thumbnails, the SQLite DB and the"
+                f" graph.json will be removed. this cannot be undone.[/dim]"
+            ),
+            border_style="red",
+        )
+    )
+    confirm_text = questionary.text(
+        f"to confirm, type the scan name '{selected.display_name}':",
+        style=_QUESTIONARY_STYLE,
+    ).ask()
+    if confirm_text is None or confirm_text.strip() != selected.display_name:
+        console.print("[yellow]cancelled — name didn't match[/yellow]")
+        return
+
+    try:
+        shutil.rmtree(selected.dir)
+        console.print(f"[green]deleted[/green] [cyan]{selected.dir}[/cyan]")
+    except OSError as e:
+        console.print(f"[red]delete failed:[/red] {e}")
 
 
 def _interactive_view(output_root: Path) -> None:

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS pages (
   title TEXT,
   is_external INTEGER NOT NULL DEFAULT 0,
   is_phantom_404 INTEGER NOT NULL DEFAULT 0,
+  is_fetch_candidate INTEGER NOT NULL DEFAULT 0,
   archive_path TEXT,
   thumb_path TEXT,
   depth INTEGER NOT NULL,
@@ -93,6 +94,9 @@ CREATE TABLE IF NOT EXISTS pending (
 """
 
 
+EXTERNAL_POLICIES = ("ignore", "metadata", "archive", "crawl")
+
+
 @dataclass
 class CrawlConfig:
     start_url: str
@@ -105,10 +109,18 @@ class CrawlConfig:
     page_timeout_ms: int = 30000
     include_subdomains: bool = False
     respect_robots: bool = False
+    external_policy: str = "metadata"
     user_agent: str = "site-cartographer/0.1 (+contact)"
     viewport: tuple[int, int] = (320, 240)
     headless: bool = True
     resume: bool = False
+
+    def __post_init__(self) -> None:
+        if self.external_policy not in EXTERNAL_POLICIES:
+            raise ValueError(
+                f"external_policy must be one of {EXTERNAL_POLICIES},"
+                f" got {self.external_policy!r}"
+            )
 
     def to_json_dict(self) -> dict:
         d = asdict(self)
@@ -133,11 +145,16 @@ def open_db(db_path: Path) -> sqlite3.Connection:
 def _migrate(conn: sqlite3.Connection) -> None:
     """Backfill columns that were added after the initial schema. SQLite
     only supports ADD COLUMN, which is enough for our additive changes."""
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    runs_cols = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
     for col in ("name TEXT", "halt_reason TEXT"):
         col_name = col.split()[0]
-        if col_name not in existing:
+        if col_name not in runs_cols:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
+    pages_cols = {r[1] for r in conn.execute("PRAGMA table_info(pages)").fetchall()}
+    if "is_fetch_candidate" not in pages_cols:
+        conn.execute(
+            "ALTER TABLE pages ADD COLUMN is_fetch_candidate INTEGER NOT NULL DEFAULT 0"
+        )
     conn.commit()
 
 
@@ -223,6 +240,15 @@ async def crawl(config: CrawlConfig,
                 halt_reason = await _crawl_loop(
                     conn, run_id, browser, config, start_canonical, progress,
                 )
+                # Externals pass runs after the BFS regardless of whether it
+                # drained or capped — externals are bounded by their own size
+                # cap, not by max_pages.
+                if config.external_policy in ("archive", "crawl"):
+                    ext_halt = await _externals_pass(
+                        conn, run_id, browser, config, start_canonical, progress,
+                    )
+                    if ext_halt is not None:
+                        halt_reason = ext_halt
         except (asyncio.CancelledError, KeyboardInterrupt):
             # Always mark the run as interrupted before unwinding so a
             # subsequent resume picks up cleanly. The pending queue is
@@ -235,6 +261,153 @@ async def crawl(config: CrawlConfig,
     finally:
         conn.close()
     return layout["root"]
+
+
+async def _externals_pass(
+    conn: sqlite3.Connection,
+    run_id: int,
+    browser: BrowserSession,
+    config: CrawlConfig,
+    start_canonical: str,
+    progress: ProgressReporter,
+) -> str | None:
+    """After the main BFS, fetch externals that were marked is_fetch_candidate.
+
+    Honours max_file_size but not max_pages — externals are bounded by size.
+    For 'crawl' policy, also extracts links from the external page (one hop
+    only); newly-discovered destinations become metadata-only nodes.
+    """
+    while True:
+        if config.max_file_size is not None:
+            size = dir_size(config.output_dir)
+            if size >= config.max_file_size:
+                reason = (f"reached max-file-size during externals pass "
+                          f"({size}B >= {config.max_file_size}B)")
+                logger.info(reason)
+                progress.on_halt(reason)
+                return reason
+
+        row = conn.execute(
+            "SELECT id, url_canonical, depth FROM pages"
+            " WHERE run_id = ? AND is_external = 1 AND is_fetch_candidate = 1"
+            " AND archive_path IS NULL"
+            " ORDER BY id ASC LIMIT 1",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+
+        page_id = row["id"]
+        url = row["url_canonical"]
+        depth = row["depth"]
+
+        logger.info("[ext] %s", url)
+        await _fetch_external(conn, run_id, browser, config, page_id, url, depth)
+
+        archived_count = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ? AND archive_path IS NOT NULL",
+            (run_id,),
+        ).fetchone()[0]
+        discovered = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ?", (run_id,),
+        ).fetchone()[0]
+        queue_size = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ? AND is_external = 1"
+            " AND is_fetch_candidate = 1 AND archive_path IS NULL",
+            (run_id,),
+        ).fetchone()[0]
+        title_row = conn.execute(
+            "SELECT title FROM pages WHERE id = ?", (page_id,),
+        ).fetchone()
+
+        progress.on_page(
+            idx=archived_count, depth=depth, url=url,
+            status=conn.execute(
+                "SELECT http_status FROM pages WHERE id = ?", (page_id,)
+            ).fetchone()[0],
+            title=title_row["title"] if title_row else "",
+            archived_bytes=dir_size(config.output_dir),
+            queue_size=queue_size,
+            archived_count=archived_count,
+            discovered=discovered,
+            kind="archived",
+        )
+
+        await asyncio.sleep(config.delay_ms / 1000)
+
+
+async def _fetch_external(
+    conn: sqlite3.Connection,
+    run_id: int,
+    browser: BrowserSession,
+    config: CrawlConfig,
+    page_id: int,
+    url: str,
+    depth: int,
+) -> None:
+    async with browser.open_page(url, timeout_ms=config.page_timeout_ms) as ph:
+        if ph.error is not None:
+            conn.execute(
+                "UPDATE pages SET error = ?, is_fetch_candidate = 0 WHERE id = ?",
+                (ph.error, page_id),
+            )
+            conn.commit()
+            return
+
+        title = await ph.title()
+        final_url = ph.page.url
+        status = ph.response.status if ph.response is not None else None
+
+        a_path = archive_path(config.output_dir, url)
+        t_path = thumb_path(config.output_dir, url)
+        try:
+            await ph.save_thumbnail(t_path)
+        except Exception as e:
+            logger.warning("ext thumbnail failed for %s: %s", url, e)
+        try:
+            await ph.save_inline_html(a_path)
+        except Exception as e:
+            logger.warning("ext archive failed for %s: %s", url, e)
+
+        rel_a = a_path.relative_to(config.output_dir).as_posix() if a_path.exists() else None
+        rel_t = t_path.relative_to(config.output_dir).as_posix() if t_path.exists() else None
+        conn.execute(
+            "UPDATE pages SET title = ?, http_status = ?, archive_path = ?,"
+            " thumb_path = ?, fetched_at = ? WHERE id = ?",
+            (title, status, rel_a, rel_t, _now(), page_id),
+        )
+
+        if config.external_policy == "crawl":
+            html = await ph.html()
+            for link in extract_links(html, base_url=final_url):
+                coords_json: str | None = None
+                if link.kind == "area" and link.coords is not None:
+                    coords_json = json.dumps({
+                        "shape": link.shape,
+                        "coords": link.coords,
+                        "image_src": link.image_src,
+                    })
+                conn.execute(
+                    "INSERT INTO edges (run_id, src_page_id, dst_url_canonical,"
+                    " link_kind, link_text, coords_json, shape)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, page_id, link.url, link.kind, link.text,
+                     coords_json, link.shape),
+                )
+                # second-level externals are metadata-only — never fetched.
+                existing_dst = conn.execute(
+                    "SELECT id FROM pages WHERE run_id = ? AND url_canonical = ?",
+                    (run_id, link.url),
+                ).fetchone()
+                if existing_dst is None:
+                    conn.execute(
+                        "INSERT INTO pages (run_id, url_canonical, url_original,"
+                        " is_external, is_fetch_candidate, depth, fetched_at)"
+                        " VALUES (?, ?, ?, 1, 0, ?, ?)",
+                        (run_id, link.url, link.url, depth + 1, _now()),
+                    )
+
+        conn.commit()
 
 
 def _finalise_with_progress(
@@ -429,6 +602,13 @@ async def _fetch_one(
         )
 
         for link in extract_links(html, base_url=final_url):
+            same_origin = is_same_origin(
+                link.url, start_canonical,
+                include_subdomains=config.include_subdomains,
+            )
+            if not same_origin and config.external_policy == "ignore":
+                continue  # silently drop the edge AND the destination
+
             coords_json: str | None = None
             if link.kind == "area" and link.coords is not None:
                 coords_json = json.dumps({
@@ -445,10 +625,6 @@ async def _fetch_one(
                  coords_json, link.shape),
             )
 
-            same_origin = is_same_origin(
-                link.url, start_canonical,
-                include_subdomains=config.include_subdomains,
-            )
             existing_dst = conn.execute(
                 "SELECT id FROM pages WHERE run_id = ? AND url_canonical = ?",
                 (run_id, link.url),
@@ -464,11 +640,15 @@ async def _fetch_one(
                     )
             else:
                 if existing_dst is None:
+                    fetch_candidate = (
+                        1 if config.external_policy in ("archive", "crawl") else 0
+                    )
                     conn.execute(
                         "INSERT INTO pages (run_id, url_canonical, url_original,"
-                        " is_external, depth, fetched_at)"
-                        " VALUES (?, ?, ?, 1, ?, ?)",
-                        (run_id, link.url, link.url, depth + 1, _now()),
+                        " is_external, is_fetch_candidate, depth, fetched_at)"
+                        " VALUES (?, ?, ?, 1, ?, ?, ?)",
+                        (run_id, link.url, link.url, fetch_candidate,
+                         depth + 1, _now()),
                     )
 
         conn.commit()

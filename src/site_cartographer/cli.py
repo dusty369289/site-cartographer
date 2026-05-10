@@ -42,8 +42,25 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
                    help="halt when archive exceeds this size, e.g. 500MB or 2GB")
     p.add_argument("--delay-ms", type=int, default=250)
     p.add_argument("--page-timeout-ms", type=int, default=30000)
-    p.add_argument("--include-subdomains", action="store_true")
-    p.add_argument("--respect-robots", action="store_true")
+    p.add_argument(
+        "--include-subdomains", action="store_true",
+        help="also crawl any subdomain of the start host (e.g. blog.foo.com"
+             " when starting at foo.com); `www.` is always treated as same-site",
+    )
+    p.add_argument(
+        "--respect-robots", action="store_true",
+        help="honour the target's /robots.txt disallow rules (off by default)",
+    )
+    p.add_argument(
+        "--external-policy",
+        choices=("ignore", "metadata", "archive", "crawl"),
+        default="metadata",
+        help="how to handle out-of-scope links. "
+             "ignore: silently drop. "
+             "metadata: record edge + URL only (default). "
+             "archive: also fetch & save the external page. "
+             "crawl: archive AND extract its links (one hop only)",
+    )
     p.add_argument("--user-agent", default=f"site-cartographer/{__version__}")
     p.add_argument("--resume", type=Path, default=None,
                    help="resume an existing run dir")
@@ -131,6 +148,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         page_timeout_ms=args.page_timeout_ms,
         include_subdomains=args.include_subdomains,
         respect_robots=args.respect_robots,
+        external_policy=args.external_policy,
         user_agent=args.user_agent,
         viewport=args.viewport,
         headless=not args.headed,

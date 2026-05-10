@@ -1,6 +1,9 @@
+from pathlib import Path
+
 import pytest
 
 from site_cartographer.archive import format_size, parse_size
+from site_cartographer.crawler import CrawlConfig
 
 
 @pytest.mark.parametrize("text,expected", [
@@ -38,3 +41,22 @@ def test_parse_size_passthrough_int():
 ])
 def test_format_size_picks_appropriate_unit(n, expected_substring):
     assert format_size(n) == expected_substring
+
+
+@pytest.mark.parametrize("policy", ["ignore", "metadata", "archive", "crawl"])
+def test_crawl_config_accepts_valid_external_policies(policy, tmp_path):
+    cfg = CrawlConfig(
+        start_url="https://example.com/",
+        output_dir=tmp_path,
+        external_policy=policy,
+    )
+    assert cfg.external_policy == policy
+
+
+def test_crawl_config_rejects_unknown_external_policy(tmp_path):
+    with pytest.raises(ValueError, match="external_policy"):
+        CrawlConfig(
+            start_url="https://example.com/",
+            output_dir=tmp_path,
+            external_policy="bogus",
+        )
