@@ -32,7 +32,7 @@ def export_cytoscape_json(run_dir: Path, run_id: int | None = None) -> Path:
         seen_ids: set[str] = set()
 
         for row in conn.execute(
-            "SELECT url_canonical, title, thumb_path, mhtml_path,"
+            "SELECT url_canonical, title, thumb_path, archive_path,"
             " is_external, is_phantom_404, http_status, depth"
             " FROM pages WHERE run_id = ?",
             (run_id,),
@@ -45,7 +45,7 @@ def export_cytoscape_json(run_dir: Path, run_id: int | None = None) -> Path:
                     "url": row["url_canonical"],
                     "label": row["title"] or row["url_canonical"],
                     "thumb": _to_url_path(row["thumb_path"]),
-                    "mhtml": _to_url_path(row["mhtml_path"]),
+                    "archive": _to_url_path(row["archive_path"]),
                     "is_external": bool(row["is_external"]),
                     "is_phantom_404": bool(row["is_phantom_404"]),
                     "http_status": row["http_status"],
@@ -78,7 +78,7 @@ def export_cytoscape_json(run_dir: Path, run_id: int | None = None) -> Path:
                         "url": row["dst_url_canonical"],
                         "label": row["dst_url_canonical"],
                         "thumb": None,
-                        "mhtml": None,
+                        "archive": None,
                         "is_external": False,
                         "is_phantom_404": False,
                         "is_unvisited": True,

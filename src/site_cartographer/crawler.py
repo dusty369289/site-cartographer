@@ -8,22 +8,45 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .archive import ensure_run_dirs, mhtml_path, thumb_path
+from .archive import archive_path, dir_size, ensure_run_dirs, thumb_path
 from .browser import BrowserSession
 from .links import body_hash, canonicalize, extract_links, is_same_origin
 
 logger = logging.getLogger(__name__)
 
 
+class ProgressReporter:
+    """Hook for UI layers to observe crawl events. The default impl is silent."""
+
+    def on_start(self, *, run_id: int, start_url: str, max_pages: int,
+                 max_size: int | None) -> None:
+        pass
+
+    def on_page(self, *, idx: int, depth: int, url: str, status: int | None,
+                title: str, archived_bytes: int, queue_size: int,
+                archived_count: int, discovered: int, kind: str) -> None:
+        """kind in {'archived', 'phantom', 'duplicate', 'external', 'error'}"""
+        pass
+
+    def on_halt(self, reason: str) -> None:
+        pass
+
+    def on_finish(self, *, archived_count: int, total_pages: int,
+                  edges: int) -> None:
+        pass
+
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY,
+  name TEXT,
   start_url TEXT NOT NULL,
   start_url_canonical TEXT NOT NULL,
   started_at TEXT NOT NULL,
   finished_at TEXT,
   config_json TEXT NOT NULL,
-  homepage_body_hash TEXT
+  homepage_body_hash TEXT,
+  halt_reason TEXT
 );
 
 CREATE TABLE IF NOT EXISTS pages (
@@ -36,7 +59,7 @@ CREATE TABLE IF NOT EXISTS pages (
   title TEXT,
   is_external INTEGER NOT NULL DEFAULT 0,
   is_phantom_404 INTEGER NOT NULL DEFAULT 0,
-  mhtml_path TEXT,
+  archive_path TEXT,
   thumb_path TEXT,
   depth INTEGER NOT NULL,
   fetched_at TEXT,
@@ -74,8 +97,10 @@ CREATE TABLE IF NOT EXISTS pending (
 class CrawlConfig:
     start_url: str
     output_dir: Path
+    name: str | None = None
     max_pages: int = 100
     max_depth: int = 15
+    max_file_size: int | None = None  # bytes; None = unlimited
     delay_ms: int = 250
     page_timeout_ms: int = 30000
     include_subdomains: bool = False
@@ -101,7 +126,19 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA_SQL)
+    _migrate(conn)
     return conn
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Backfill columns that were added after the initial schema. SQLite
+    only supports ADD COLUMN, which is enough for our additive changes."""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+    for col in ("name TEXT", "halt_reason TEXT"):
+        col_name = col.split()[0]
+        if col_name not in existing:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {col}")
+    conn.commit()
 
 
 def start_run(conn: sqlite3.Connection, config: CrawlConfig) -> int:
@@ -116,9 +153,9 @@ def start_run(conn: sqlite3.Connection, config: CrawlConfig) -> int:
             logger.info("resuming run %s", row["id"])
             return row["id"]
     cursor = conn.execute(
-        "INSERT INTO runs (start_url, start_url_canonical, started_at, config_json)"
-        " VALUES (?, ?, ?, ?)",
-        (config.start_url, start_canonical, _now(),
+        "INSERT INTO runs (name, start_url, start_url_canonical, started_at,"
+        " config_json) VALUES (?, ?, ?, ?, ?)",
+        (config.name, config.start_url, start_canonical, _now(),
          json.dumps(config.to_json_dict())),
     )
     run_id = cursor.lastrowid
@@ -131,8 +168,12 @@ def start_run(conn: sqlite3.Connection, config: CrawlConfig) -> int:
     return run_id
 
 
-def finalise_run(conn: sqlite3.Connection, run_id: int) -> None:
-    conn.execute("UPDATE runs SET finished_at = ? WHERE id = ?", (_now(), run_id))
+def finalise_run(conn: sqlite3.Connection, run_id: int,
+                 halt_reason: str | None = None) -> None:
+    conn.execute(
+        "UPDATE runs SET finished_at = ?, halt_reason = ? WHERE id = ?",
+        (_now(), halt_reason, run_id),
+    )
     conn.commit()
 
 
@@ -149,19 +190,39 @@ def is_phantom_404(
     )
 
 
-async def crawl(config: CrawlConfig) -> Path:
+async def crawl(config: CrawlConfig,
+                progress: ProgressReporter | None = None) -> Path:
+    progress = progress or ProgressReporter()
     layout = ensure_run_dirs(config.output_dir)
     conn = open_db(layout["db"])
+    halt_reason: str | None = None
     try:
         run_id = start_run(conn, config)
         start_canonical = canonicalize(config.start_url)
+        progress.on_start(
+            run_id=run_id, start_url=config.start_url,
+            max_pages=config.max_pages, max_size=config.max_file_size,
+        )
         async with BrowserSession(
             headless=config.headless,
             viewport=config.viewport,
             user_agent=config.user_agent,
         ) as browser:
-            await _crawl_loop(conn, run_id, browser, config, start_canonical)
-        finalise_run(conn, run_id)
+            halt_reason = await _crawl_loop(
+                conn, run_id, browser, config, start_canonical, progress,
+            )
+        archived = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ? AND archive_path IS NOT NULL",
+            (run_id,),
+        ).fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ?", (run_id,),
+        ).fetchone()[0]
+        edges = conn.execute(
+            "SELECT COUNT(*) FROM edges WHERE run_id = ?", (run_id,),
+        ).fetchone()[0]
+        finalise_run(conn, run_id, halt_reason)
+        progress.on_finish(archived_count=archived, total_pages=total, edges=edges)
     finally:
         conn.close()
     return layout["root"]
@@ -173,7 +234,8 @@ async def _crawl_loop(
     browser: BrowserSession,
     config: CrawlConfig,
     start_canonical: str,
-) -> None:
+    progress: ProgressReporter,
+) -> str | None:
     while True:
         pages_done = conn.execute(
             "SELECT COUNT(*) AS n FROM pages WHERE run_id = ?"
@@ -181,8 +243,19 @@ async def _crawl_loop(
             (run_id,),
         ).fetchone()["n"]
         if pages_done >= config.max_pages:
-            logger.info("reached max-pages cap (%s)", config.max_pages)
-            break
+            reason = f"reached max-pages cap ({config.max_pages})"
+            logger.info(reason)
+            progress.on_halt(reason)
+            return reason
+
+        if config.max_file_size is not None:
+            size = dir_size(config.output_dir)
+            if size >= config.max_file_size:
+                reason = (f"reached max-file-size cap "
+                          f"({size}B >= {config.max_file_size}B)")
+                logger.info(reason)
+                progress.on_halt(reason)
+                return reason
 
         row = conn.execute(
             "SELECT id, url_canonical, depth FROM pending WHERE run_id = ?"
@@ -190,8 +263,10 @@ async def _crawl_loop(
             (run_id,),
         ).fetchone()
         if row is None:
-            logger.info("queue drained")
-            break
+            reason = "queue drained"
+            logger.info(reason)
+            progress.on_halt(reason)
+            return None
 
         pending_id = row["id"]
         url = row["url_canonical"]
@@ -212,9 +287,34 @@ async def _crawl_loop(
             continue
 
         logger.info("[%d] depth=%d %s", pages_done + 1, depth, url)
-        await _fetch_one(conn, run_id, browser, config, start_canonical, url, depth)
+        page_kind, status, title = await _fetch_one(
+            conn, run_id, browser, config, start_canonical, url, depth,
+        )
         conn.execute("DELETE FROM pending WHERE id = ?", (pending_id,))
         conn.commit()
+
+        archived_count = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ? AND archive_path IS NOT NULL",
+            (run_id,),
+        ).fetchone()[0]
+        discovered = conn.execute(
+            "SELECT COUNT(*) FROM pages WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()[0] + conn.execute(
+            "SELECT COUNT(*) FROM pending WHERE run_id = ?", (run_id,),
+        ).fetchone()[0]
+        queue_size = conn.execute(
+            "SELECT COUNT(*) FROM pending WHERE run_id = ?", (run_id,),
+        ).fetchone()[0]
+        archived_bytes = dir_size(config.output_dir)
+
+        progress.on_page(
+            idx=pages_done + 1, depth=depth, url=url, status=status,
+            title=title, archived_bytes=archived_bytes, queue_size=queue_size,
+            archived_count=archived_count, discovered=discovered,
+            kind=page_kind,
+        )
+
         await asyncio.sleep(config.delay_ms / 1000)
 
 
@@ -226,7 +326,10 @@ async def _fetch_one(
     start_canonical: str,
     url: str,
     depth: int,
-) -> None:
+) -> tuple[str, int | None, str]:
+    """Returns (kind, http_status, title) where kind is one of
+    'archived' | 'phantom' | 'duplicate' | 'error'.
+    """
     async with browser.open_page(url, timeout_ms=config.page_timeout_ms) as ph:
         if ph.error is not None:
             conn.execute(
@@ -235,7 +338,7 @@ async def _fetch_one(
                 " VALUES (?, ?, ?, NULL, ?, ?, ?)",
                 (run_id, url, url, depth, _now(), ph.error),
             )
-            return
+            return ("error", None, "")
 
         html = await ph.html()
         title = await ph.title()
@@ -273,27 +376,27 @@ async def _fetch_one(
 
         if phantom:
             logger.debug("phantom 404: %s", url)
-            return
+            return ("phantom", status, title)
         if is_dup_body:
             logger.debug("duplicate body, skipping link extraction: %s", url)
-            return
+            return ("duplicate", status, title)
 
-        m_path = mhtml_path(config.output_dir, url)
+        a_path = archive_path(config.output_dir, url)
         t_path = thumb_path(config.output_dir, url)
         try:
             await ph.save_thumbnail(t_path)
         except Exception as e:
             logger.warning("thumbnail failed for %s: %s", url, e)
         try:
-            await ph.save_mhtml(m_path)
+            await ph.save_inline_html(a_path)
         except Exception as e:
-            logger.warning("mhtml failed for %s: %s", url, e)
+            logger.warning("archive failed for %s: %s", url, e)
 
-        rel_m = m_path.relative_to(config.output_dir).as_posix() if m_path.exists() else None
+        rel_a = a_path.relative_to(config.output_dir).as_posix() if a_path.exists() else None
         rel_t = t_path.relative_to(config.output_dir).as_posix() if t_path.exists() else None
         conn.execute(
-            "UPDATE pages SET mhtml_path = ?, thumb_path = ? WHERE id = ?",
-            (rel_m, rel_t, page_id),
+            "UPDATE pages SET archive_path = ?, thumb_path = ? WHERE id = ?",
+            (rel_a, rel_t, page_id),
         )
 
         for link in extract_links(html, base_url=final_url):
@@ -340,3 +443,4 @@ async def _fetch_one(
                     )
 
         conn.commit()
+        return ("archived", status, title)

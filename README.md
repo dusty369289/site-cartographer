@@ -17,27 +17,40 @@ playwright install chromium
 
 ## Usage
 
+Run with no args for an interactive menu:
+
 ```bash
-site-cartographer https://www.ourmachineisdown.com/ --max-pages 100 --max-depth 5
+site-cartographer
 ```
 
-The crawl writes everything under `output/<timestamp>/`:
+Or use one of the subcommands directly:
+
+```bash
+site-cartographer scan https://www.ourmachineisdown.com/ --name omid --max-pages 100
+site-cartographer list
+site-cartographer view omid              # by name
+site-cartographer view output/omid-20260510-171535   # by path
+```
+
+The crawl writes everything under `output/<name>-<timestamp>/`:
 
 ```
-output/20260510-164558/
+output/omid-20260510-171535/
 ├── crawl.sqlite     # pages, edges, pending queue, run metadata
 ├── graph.json       # Cytoscape elements format
-├── pages/           # one .mhtml per crawled page
+├── pages/           # one self-contained .html per crawled page (assets inlined as data URIs)
 ├── thumbs/          # one .png viewport screenshot per page
 └── viewer/          # self-contained HTML viewer (copied at end of crawl)
 ```
 
-### Common flags
+### Scan flags
 
 | Flag | Default | Purpose |
 |---|---|---|
+| `--name NAME` | — | Memorable label, used in the run dir name and `list` output |
 | `--max-pages N` | 100 | Cap on internal pages crawled |
 | `--max-depth N` | 15 | BFS depth cap |
+| `--max-file-size SIZE` | unlimited | Halt when archive grows past this (e.g. `500MB`, `2GB`) |
 | `--delay-ms N` | 250 | Politeness delay between page fetches |
 | `--include-subdomains` | off | Treat any subdomain of base as in-scope (default already strips `www.`) |
 | `--respect-robots` | off | Honour `/robots.txt` (opt-in) |
@@ -45,15 +58,13 @@ output/20260510-164558/
 | `--headed` | off | Show the browser window (debug) |
 | `-v` / `-vv` | off | INFO / DEBUG logging |
 
+While the crawl runs, a live Rich panel shows: progress bar, archived/discovered/queue counts, current URL, archive size vs cap, and a tail of recently fetched pages with status glyphs (`+` archived, `=` duplicate body, `?` phantom 404, `!` error).
+
 ## Viewer
 
-```bash
-python -m site_cartographer.serve output/20260510-164558
-```
+`site-cartographer view <run>` (or pick from the interactive menu) starts a small HTTP server and opens <http://127.0.0.1:8000/viewer/> in your browser. Click any node to load its archived page in the side panel; clickable elements are highlighted in red (`<a>` outlined, `<area>` polygons drawn on a canvas overlay). Use the checkbox to toggle highlights.
 
-Open <http://127.0.0.1:8000/viewer/> in Chromium. Click any node to load its archived page; clickable elements are highlighted in red (`<a>` outlined, `<area>` polygons drawn on a canvas overlay). Use the checkbox to toggle highlights.
-
-A bundled HTTP server is needed because Chromium will not render MHTML loaded over `file://` — the bundled `serve.py` sets the correct `multipart/related` MIME so the iframe accepts it.
+The archived pages are self-contained HTML with all images, audio, and stylesheets inlined as data URIs — they render in any iframe from any origin, no MHTML weirdness.
 
 ## How it handles common pitfalls
 
@@ -69,18 +80,20 @@ A bundled HTTP server is needed because Chromium will not render MHTML loaded ov
 pytest -q
 ```
 
-20 unit tests covering URL canonicalisation, link extraction (incl. image maps), body-hash dedupe, and same-origin scope. No live network access required.
+42 unit tests covering URL canonicalisation, link extraction (incl. image maps), body-hash dedupe, same-origin scope, and human-readable size parsing. No live network access required.
 
 ## Layout
 
 ```
 src/site_cartographer/
-├── cli.py        # argparse entrypoint
-├── crawler.py    # BFS orchestrator, SQLite schema, dedupe
-├── browser.py    # Playwright wrapper, MHTML + thumbnail capture
+├── cli.py        # argparse entrypoint with scan/view/list subcommands
+├── tui.py        # interactive menu + scan/view flows (Rich + questionary)
+├── progress.py   # live crawl progress panel
+├── crawler.py    # BFS orchestrator, SQLite schema, dedupe, size-cap halt
+├── browser.py    # Playwright wrapper, inline-HTML + thumbnail capture
 ├── links.py      # canonicalise, same-origin, extract <a>/<area>
 ├── graph.py      # SQLite -> Cytoscape JSON
-├── archive.py    # output dir layout + filename helpers
-├── serve.py      # MHTML-aware static server for the viewer
+├── archive.py    # output dir layout, run listing, size helpers
+├── serve.py      # static server for the viewer
 └── viewer/       # index.html + viewer.js + cytoscape.min.js
 ```

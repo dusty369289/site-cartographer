@@ -9,10 +9,13 @@
   let edgesByPage = new Map();
 
   fetch(RUN_BASE + "graph.json")
-    .then((r) => r.json())
+    .then((r) => {
+      if (!r.ok) throw new Error("graph.json: HTTP " + r.status);
+      return r.json();
+    })
     .then(initGraph)
     .catch((err) => {
-      document.getElementById("panel-title").textContent = "graph.json missing";
+      document.getElementById("panel-title").textContent = "viewer error: " + err.message;
       console.error(err);
     });
 
@@ -21,64 +24,74 @@
 
     const elements = [
       ...graph.nodes.map(toNode),
-      ...graph.edges.map(toEdge),
+      ...graph.edges,
     ];
 
-    cy = cytoscape({
-      container: document.getElementById("cy"),
-      elements: elements,
-      style: [
-        {
-          selector: "node",
-          style: {
-            "background-color": "#444",
-            "background-image": "data(thumb_url)",
-            "background-fit": "cover",
-            "background-opacity": 1,
-            width: 60,
-            height: 45,
-            label: "data(short_label)",
-            color: "#ddd",
-            "font-size": 8,
-            "text-valign": "bottom",
-            "text-margin-y": 4,
-            "text-wrap": "ellipsis",
-            "text-max-width": "70px",
-            "border-width": 1,
-            "border-color": "#666",
+    try {
+      cy = cytoscape({
+        container: document.getElementById("cy"),
+        elements: elements,
+        style: [
+          {
+            selector: "node",
+            style: {
+              "background-color": "#444",
+              "background-fit": "cover",
+              "background-opacity": 1,
+              width: 60,
+              height: 45,
+              label: "data(short_label)",
+              color: "#ddd",
+              "font-size": 8,
+              "text-valign": "bottom",
+              "text-margin-y": 4,
+              "text-wrap": "ellipsis",
+              "text-max-width": "70px",
+              "border-width": 1,
+              "border-color": "#666",
+            },
           },
-        },
-        {
-          selector: "node[?is_external]",
-          style: { "background-color": "#552", "border-color": "#aa6", "shape": "diamond" },
-        },
-        {
-          selector: "node[?is_unvisited]",
-          style: { "background-color": "#333", "border-color": "#555", "border-style": "dashed" },
-        },
-        {
-          selector: "node[?is_phantom_404]",
-          style: { "background-color": "#522", "border-color": "#a66" },
-        },
-        {
-          selector: "edge",
-          style: {
-            "curve-style": "bezier",
-            "target-arrow-shape": "triangle",
-            "line-color": "#444",
-            "target-arrow-color": "#444",
-            width: 1,
-            "arrow-scale": 0.6,
+          {
+            selector: "node[thumb_url]",
+            style: {
+              "background-image": "data(thumb_url)",
+            },
           },
-        },
-        {
-          selector: "edge[kind = 'area']",
-          style: { "line-color": "#664", "target-arrow-color": "#664" },
-        },
-      ],
-      layout: { name: "cose", animate: false, nodeRepulsion: 8000, idealEdgeLength: 100 },
-      wheelSensitivity: 0.2,
-    });
+          {
+            selector: "node[?is_external]",
+            style: { "background-color": "#552", "border-color": "#aa6", "shape": "diamond" },
+          },
+          {
+            selector: "node[?is_unvisited]",
+            style: { "background-color": "#333", "border-color": "#555", "border-style": "dashed" },
+          },
+          {
+            selector: "node[?is_phantom_404]",
+            style: { "background-color": "#522", "border-color": "#a66" },
+          },
+          {
+            selector: "edge",
+            style: {
+              "curve-style": "bezier",
+              "target-arrow-shape": "triangle",
+              "line-color": "#444",
+              "target-arrow-color": "#444",
+              width: 1,
+              "arrow-scale": 0.6,
+            },
+          },
+          {
+            selector: "edge[kind = 'area']",
+            style: { "line-color": "#664", "target-arrow-color": "#664" },
+          },
+        ],
+        layout: { name: "cose", animate: false, nodeRepulsion: 8000, idealEdgeLength: 100 },
+        wheelSensitivity: 0.2,
+      });
+    } catch (err) {
+      console.error("cytoscape init failed", err);
+      throw err;
+    }
 
     cy.on("tap", "node", (evt) => showNode(evt.target.data()));
 
@@ -96,13 +109,12 @@
 
   function toNode(n) {
     const d = n.data;
-    return {
-      data: {
-        ...d,
-        thumb_url: d.thumb ? RUN_BASE + d.thumb : "",
-        short_label: shortLabel(d),
-      },
-    };
+    const data = { ...d, short_label: shortLabel(d) };
+    // Only set thumb_url when a thumbnail exists; the style selector
+    // [thumb_url] then keys off attribute presence, so unvisited/external
+    // nodes never trigger the background-image URL parser.
+    if (d.thumb) data.thumb_url = RUN_BASE + d.thumb;
+    return { data: data };
   }
 
   function shortLabel(d) {
@@ -121,27 +133,36 @@
 
   function showNode(data) {
     document.getElementById("panel-title").textContent = data.label || data.url;
-    const openLink = document.getElementById("open-page");
-    openLink.href = data.url;
-    openLink.style.display = "inline";
+
+    const openOriginal = document.getElementById("open-page");
+    openOriginal.href = data.url;
+    openOriginal.style.display = "inline";
+    openOriginal.textContent = "open original URL";
 
     const empty = document.getElementById("empty-msg");
     const iframe = document.getElementById("page-iframe");
 
-    if (!data.mhtml) {
+    if (!data.archive) {
       empty.style.display = "block";
       iframe.style.display = "none";
-      empty.textContent = data.is_external
-        ? "external link — not archived. open in new tab to view."
-        : data.is_phantom_404
-          ? "phantom 404 — server returned the homepage for this URL."
-          : "page not archived (unvisited or capture failed).";
+      iframe.src = "about:blank";
+      let msg;
+      if (data.is_external) {
+        msg = "external link — not archived. use 'open original URL'.";
+      } else if (data.is_phantom_404) {
+        msg = "phantom 404 — server returned the homepage for this URL.";
+      } else if (data.is_unvisited) {
+        msg = "discovered but not crawled (over max-pages cap). re-run with a higher --max-pages to archive.";
+      } else {
+        msg = "page not archived (capture failed during crawl).";
+      }
+      empty.textContent = msg;
       return;
     }
 
     empty.style.display = "none";
     iframe.style.display = "block";
-    iframe.src = RUN_BASE + data.mhtml;
+    iframe.src = RUN_BASE + data.archive;
     iframe.onload = () => onIframeLoad(data);
   }
 

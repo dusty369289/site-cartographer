@@ -5,12 +5,21 @@ import asyncio
 import logging
 import shutil
 import sys
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
+from rich.console import Console
+from rich.logging import RichHandler
+
 from . import __version__
+from .archive import RunSummary, format_size, list_runs, parse_size
 from .crawler import CrawlConfig, crawl
 from .graph import export_cytoscape_json
+from .progress import RichProgressReporter
+from .serve import serve
+
+console = Console()
 
 
 def _parse_viewport(s: str) -> tuple[int, int]:
@@ -21,17 +30,16 @@ def _parse_viewport(s: str) -> tuple[int, int]:
         raise argparse.ArgumentTypeError(f"viewport must be WxH, got {s!r}") from e
 
 
-def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        prog="site-cartographer",
-        description="Crawl a site, archive each page as MHTML, and emit"
-                    " an interactive Cytoscape graph viewer.",
-    )
+def _add_scan_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("start_url", help="URL to start crawling from")
+    p.add_argument("--name", default=None,
+                   help="give this scan a memorable name")
     p.add_argument("--output", type=Path, default=None,
-                   help="output dir (default: ./output/<timestamp>)")
+                   help="output dir (default: ./output/<name>-<timestamp>)")
     p.add_argument("--max-pages", type=int, default=100)
     p.add_argument("--max-depth", type=int, default=15)
+    p.add_argument("--max-file-size", type=parse_size, default=None,
+                   help="halt when archive exceeds this size, e.g. 500MB or 2GB")
     p.add_argument("--delay-ms", type=int, default=250)
     p.add_argument("--page-timeout-ms", type=int, default=30000)
     p.add_argument("--include-subdomains", action="store_true")
@@ -39,60 +47,86 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--user-agent", default=f"site-cartographer/{__version__}")
     p.add_argument("--resume", type=Path, default=None,
                    help="resume an existing run dir")
-    p.add_argument("--viewport", type=_parse_viewport, default=(320, 240),
-                   help="WxH for thumbnails / page rendering (default 320x240)")
-    p.add_argument("--headed", action="store_true",
-                   help="show the browser window (debug)")
+    p.add_argument("--viewport", type=_parse_viewport, default=(320, 240))
+    p.add_argument("--headed", action="store_true")
     p.add_argument("-v", "--verbose", action="count", default=0)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="site-cartographer",
+        description="crawl a site, archive each page, and explore the link graph",
+    )
     p.add_argument("--version", action="version", version=__version__)
+    p.add_argument("--output-root", type=Path, default=Path("output"),
+                   help="root dir under which all scan output dirs live")
+
+    sub = p.add_subparsers(dest="command")
+
+    sp_scan = sub.add_parser("scan", help="run a new crawl")
+    _add_scan_args(sp_scan)
+
+    sp_view = sub.add_parser("view", help="serve a saved scan in the viewer")
+    sp_view.add_argument("run", type=str, nargs="?",
+                         help="run directory name or path (omit for picker)")
+    sp_view.add_argument("--port", type=int, default=8000)
+    sp_view.add_argument("--no-browser", action="store_true")
+
+    sub.add_parser("list", help="list saved scans")
+    sub.add_parser("interactive", help="open the interactive TUI")
     return p
 
 
-def install_viewer(run_dir: Path) -> None:
+def _setup_logging(verbose: int) -> None:
+    level = logging.WARNING
+    if verbose == 1:
+        level = logging.INFO
+    elif verbose >= 2:
+        level = logging.DEBUG
+    logging.basicConfig(
+        level=level, handlers=[RichHandler(console=console, show_path=False)],
+        format="%(message)s", datefmt="%H:%M:%S",
+    )
+
+
+def _install_viewer(run_dir: Path) -> None:
     src = Path(__file__).parent / "viewer"
     if not src.is_dir():
         return
     dst = run_dir / "viewer"
     dst.mkdir(parents=True, exist_ok=True)
     for entry in src.iterdir():
-        target = dst / entry.name
         if entry.is_file():
-            shutil.copy2(entry, target)
+            shutil.copy2(entry, dst / entry.name)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-
-    log_level = logging.WARNING
-    if args.verbose == 1:
-        log_level = logging.INFO
-    elif args.verbose >= 2:
-        log_level = logging.DEBUG
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+def _cmd_scan(args: argparse.Namespace) -> int:
+    _setup_logging(args.verbose)
 
     if args.resume is not None:
         output_dir = args.resume
         if not output_dir.is_dir():
-            print(f"resume dir not found: {output_dir}", file=sys.stderr)
+            console.print(f"[red]resume dir not found:[/red] {output_dir}")
             return 2
         resume_flag = True
     else:
-        output_dir = (
-            args.output
-            if args.output is not None
-            else Path("output") / datetime.now().strftime("%Y%m%d-%H%M%S")
-        )
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        if args.output is not None:
+            output_dir = args.output
+        elif args.name:
+            from .tui import _slugify_name
+            output_dir = args.output_root / f"{_slugify_name(args.name)}-{timestamp}"
+        else:
+            output_dir = args.output_root / timestamp
         resume_flag = False
 
     config = CrawlConfig(
         start_url=args.start_url,
         output_dir=output_dir,
+        name=args.name,
         max_pages=args.max_pages,
         max_depth=args.max_depth,
+        max_file_size=args.max_file_size,
         delay_ms=args.delay_ms,
         page_timeout_ms=args.page_timeout_ms,
         include_subdomains=args.include_subdomains,
@@ -103,14 +137,88 @@ def main(argv: list[str] | None = None) -> int:
         resume=resume_flag,
     )
 
-    print(f"crawl -> {output_dir}")
-    asyncio.run(crawl(config))
+    console.print(f"[dim]-> writing to[/dim] [cyan]{output_dir}[/cyan]")
+    try:
+        with RichProgressReporter(console) as reporter:
+            asyncio.run(crawl(config, progress=reporter))
+    except KeyboardInterrupt:
+        console.print("[yellow]interrupted by user[/yellow]")
+        return 130
 
-    install_viewer(output_dir)
-    graph_path = export_cytoscape_json(output_dir)
-    print(f"graph written -> {graph_path}")
-    print(f"launch viewer: python -m site_cartographer.serve {output_dir}")
+    _install_viewer(output_dir)
+    try:
+        graph_path = export_cytoscape_json(output_dir)
+        console.print(f"[dim]graph ->[/dim] [cyan]{graph_path}[/cyan]")
+    except Exception as e:
+        console.print(f"[yellow]graph export failed: {e}[/yellow]")
+    console.print(
+        "[dim]launch viewer:[/dim]"
+        f" [cyan]site-cartographer view {output_dir}[/cyan]"
+    )
     return 0
+
+
+def _resolve_run(arg: str | None, output_root: Path) -> Path | None:
+    """Resolve a run reference (name, dir name, or path) to a run dir."""
+    if arg is None:
+        return None
+    p = Path(arg)
+    if p.is_dir() and (p / "crawl.sqlite").is_file():
+        return p
+    candidate = output_root / arg
+    if candidate.is_dir() and (candidate / "crawl.sqlite").is_file():
+        return candidate
+    runs = list_runs(output_root)
+    matches = [r.dir for r in runs if r.name == arg or r.dir.name == arg]
+    if matches:
+        return matches[0]
+    return None
+
+
+def _cmd_view(args: argparse.Namespace) -> int:
+    if args.run is None:
+        from .tui import _interactive_view
+        _interactive_view(args.output_root)
+        return 0
+    run_dir = _resolve_run(args.run, args.output_root)
+    if run_dir is None:
+        console.print(f"[red]run not found:[/red] {args.run}")
+        return 2
+    url = f"http://127.0.0.1:{args.port}/viewer/"
+    console.print(f"[dim]viewer:[/dim] [cyan]{url}[/cyan]  [dim](Ctrl+C to stop)[/dim]")
+    if not args.no_browser:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    try:
+        serve(run_dir, port=args.port)
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+def _cmd_list(args: argparse.Namespace) -> int:
+    from .tui import _print_runs_table
+    _print_runs_table(list_runs(args.output_root))
+    return 0
+
+
+def _cmd_interactive(args: argparse.Namespace) -> int:
+    from .tui import main_menu
+    return main_menu(args.output_root)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    cmd = args.command or "interactive"
+    dispatch = {
+        "scan": _cmd_scan,
+        "view": _cmd_view,
+        "list": _cmd_list,
+        "interactive": _cmd_interactive,
+    }
+    return dispatch[cmd](args)
 
 
 if __name__ == "__main__":
