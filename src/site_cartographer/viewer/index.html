@@ -9,6 +9,7 @@
   #cy { background: #111; position: relative; overflow: hidden; }
   #thumbnail-overlay {
     position: absolute; inset: 0; pointer-events: none;
+    z-index: 3;  /* sit above Sigma's WebGL canvas */
   }
   #cy-loading {
     position: absolute; inset: 0;

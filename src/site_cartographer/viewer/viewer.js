@@ -277,9 +277,9 @@
       if (!raw || !raw.thumb) return;
       const screen = renderer.graphToViewport({ x: attrs.x, y: attrs.y });
       const sizePx = renderer.getNodeDisplayData(nodeId).size;
-      // Draw at 1.4× the node radius so the thumb is visible without
-      // overwhelming the dot underneath.
-      const r = Math.max(8, sizePx * 1.4);
+      // Draw the thumb so it covers the colored dot underneath; the ring
+      // around it (colored by node type) shows what kind of page it is.
+      const r = Math.max(8, sizePx * 1.6);
       const img = loadImage(RUN_BASE + raw.thumb);
       if (!img.complete || !img.naturalWidth) return;
       ctx.save();
@@ -294,10 +294,12 @@
       const dh = ih * scale;
       ctx.drawImage(img, screen.x - dw / 2, screen.y - dh / 2, dw, dh);
       ctx.restore();
+      // Colored ring keyed to node type — replaces the colored dot we just
+      // covered up, but at the perimeter where it's still legible.
       ctx.beginPath();
       ctx.arc(screen.x, screen.y, r, 0, Math.PI * 2);
-      ctx.lineWidth = 1.2;
-      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth = Math.max(1.5, r * 0.12);
+      ctx.strokeStyle = attrs.color || "#888";
       ctx.stroke();
     });
   }
