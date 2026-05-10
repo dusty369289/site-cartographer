@@ -34,7 +34,7 @@ def export_graph_json(run_dir: Path, run_id: int | None = None) -> Path:
                 raise ValueError(f"no runs found in {layout['db']}")
             run_id = row["id"]
 
-        nodes, edges = _collect(conn, run_id)
+        nodes, edges = _collect(conn, run_id, layout["root"])
     finally:
         conn.close()
 
@@ -50,7 +50,19 @@ def export_graph_json(run_dir: Path, run_id: int | None = None) -> Path:
 export_cytoscape_json = export_graph_json
 
 
-def _collect(conn: sqlite3.Connection, run_id: int) -> tuple[list[dict], list[dict]]:
+def _archive_bytes(run_root: Path, archive_rel: str | None) -> int | None:
+    if not archive_rel:
+        return None
+    p = run_root / archive_rel
+    try:
+        return p.stat().st_size
+    except OSError:
+        return None
+
+
+def _collect(
+    conn: sqlite3.Connection, run_id: int, run_root: Path,
+) -> tuple[list[dict], list[dict]]:
     nodes: list[dict] = []
     seen_ids: set[str] = set()
     alias_to_canonical: dict[str, str] = {}
@@ -74,7 +86,7 @@ def _collect(conn: sqlite3.Connection, run_id: int) -> tuple[list[dict], list[di
 
     for row in conn.execute(
         "SELECT url_canonical, title, thumb_path, archive_path, body_hash,"
-        " is_external, is_phantom_404, http_status, depth"
+        " is_external, is_phantom_404, http_status, depth, fetched_at, error"
         " FROM pages WHERE run_id = ?",
         (run_id,),
     ):
@@ -98,10 +110,14 @@ def _collect(conn: sqlite3.Connection, run_id: int) -> tuple[list[dict], list[di
             "label": row["title"] or row["url_canonical"],
             "thumb": thumb,
             "archive": archive,
+            "archive_bytes": _archive_bytes(run_root, archive),
             "is_external": bool(row["is_external"]),
             "is_phantom_404": bool(row["is_phantom_404"]),
             "http_status": row["http_status"],
             "depth": row["depth"],
+            "fetched_at": row["fetched_at"],
+            "body_hash": row["body_hash"],
+            "error": row["error"],
         })
 
     for n in nodes:

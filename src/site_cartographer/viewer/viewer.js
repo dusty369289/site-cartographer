@@ -25,7 +25,10 @@
   let graph = null;
   let highlightsOn = true;
   let thumbnailsOn = true;
-  let edgesByPage = new Map();
+  let outgoingByPage = new Map();
+  let incomingByPage = new Map();
+  let nodeById = new Map();
+  let currentNode = null;
   let layoutAbort = false;
   const imageCache = new Map();
   const communityColors = new Map();
@@ -54,10 +57,15 @@
   function initGraph(data) {
     graph = new Graph({ multi: false, type: "undirected" });
 
-    edgesByPage = new Map();
+    outgoingByPage = new Map();
+    incomingByPage = new Map();
+    nodeById = new Map();
+    for (const n of data.nodes) nodeById.set(n.id, n);
     for (const e of data.edges) {
-      if (!edgesByPage.has(e.source)) edgesByPage.set(e.source, []);
-      edgesByPage.get(e.source).push(e);
+      if (!outgoingByPage.has(e.source)) outgoingByPage.set(e.source, []);
+      outgoingByPage.get(e.source).push(e);
+      if (!incomingByPage.has(e.target)) incomingByPage.set(e.target, []);
+      incomingByPage.get(e.target).push(e);
     }
 
     // Seed nodes in a small random circle so d3-force has something to relax.
@@ -126,6 +134,7 @@
 
     bindLayoutControls();
     bindHighlightControl();
+    bindTabs();
     setupOverlayCanvas();
 
     // Kick off the initial layout.
@@ -445,6 +454,7 @@
   function truncate(s, k) { return s.length > k ? s.slice(0, k - 1) + "…" : s; }
 
   function showNode(data) {
+    currentNode = data;
     document.getElementById("panel-title").textContent = data.label || data.url;
     const openOriginal = document.getElementById("open-page");
     openOriginal.href = data.url;
@@ -464,20 +474,149 @@
       else if (data.is_unvisited) msg = "discovered but not crawled (over max-pages cap).";
       else msg = "page not archived (capture failed during crawl).";
       empty.textContent = msg;
-      return;
+    } else {
+      if (data.alias_count) {
+        const aliasNote = ` · ${data.alias_count} alias` +
+          (data.alias_count === 1 ? "" : "es") + " (other URLs serving this content)";
+        document.getElementById("panel-title").textContent =
+          (data.label || data.url) + aliasNote;
+      }
+      empty.style.display = "none";
+      iframe.style.display = "block";
+      iframe.src = RUN_BASE + data.archive;
+      iframe.onload = () => onIframeLoad(data);
     }
 
-    if (data.alias_count) {
-      const aliasNote = ` · ${data.alias_count} alias` +
-        (data.alias_count === 1 ? "" : "es") + " (other URLs serving this content)";
-      document.getElementById("panel-title").textContent =
-        (data.label || data.url) + aliasNote;
+    populateMetadata(data);
+  }
+
+  // -------------------------------------------------------------- metadata
+  function bindTabs() {
+    document.querySelectorAll("#panel-tabs .tab").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#panel-tabs .tab").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
+        btn.classList.add("active");
+        document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+      });
+    });
+  }
+
+  function fmtBytes(n) {
+    if (n == null) return "—";
+    if (n < 1024) return n + " B";
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+    if (n < 1024 ** 3) return (n / 1024 / 1024).toFixed(1) + " MB";
+    return (n / 1024 ** 3).toFixed(1) + " GB";
+  }
+
+  function badgeFor(data) {
+    if (data.is_phantom_404) return { cls: "phantom", text: "phantom 404" };
+    if (data.is_external) return { cls: "external", text: "external" };
+    if (data.is_unvisited) return { cls: "unvisited", text: "unvisited" };
+    if (data.archive) return { cls: "archived", text: "archived" };
+    return { cls: "unvisited", text: "no archive" };
+  }
+
+  function populateMetadata(data) {
+    document.getElementById("meta-empty").style.display = "none";
+    document.getElementById("meta-body").style.display = "block";
+
+    const id = document.getElementById("meta-identity");
+    const badge = badgeFor(data);
+    id.innerHTML = "";
+    const rows = [
+      ["status", `<span class="badge ${badge.cls}">${badge.text}</span>` +
+        (data.http_status != null ? `HTTP ${data.http_status}` : "")],
+      ["url", `<dd class="url">${escapeHtml(data.url)}</dd>`, true],
+      ["title", escapeHtml(data.label || "—")],
+      ["depth", data.depth != null ? String(data.depth) : "—"],
+      ["archive size", fmtBytes(data.archive_bytes)],
+      ["fetched", data.fetched_at ? data.fetched_at.replace("T", " ").slice(0, 19) : "—"],
+      ["body hash", data.body_hash ? data.body_hash.slice(0, 12) + "…" : "—"],
+      ["community", data.id ? graph.getNodeAttribute(data.id, "community") || "—" : "—"],
+    ];
+    if (data.error) rows.push(["error", `<span style="color:#d97a7a">${escapeHtml(data.error)}</span>`]);
+    let html = "";
+    for (const r of rows) {
+      const [k, v, raw] = r;
+      html += `<dt>${k}</dt>` + (raw ? v : `<dd>${v}</dd>`);
+    }
+    id.innerHTML = html;
+
+    // Aliases
+    const aliasWrap = document.getElementById("meta-aliases-wrap");
+    if (data.aliases && data.aliases.length) {
+      aliasWrap.style.display = "";
+      document.getElementById("meta-aliases-count").textContent = data.aliases.length;
+      document.getElementById("meta-aliases").innerHTML = data.aliases.map((u) =>
+        `<li>${escapeHtml(u)}</li>`
+      ).join("");
+    } else {
+      aliasWrap.style.display = "none";
     }
 
-    empty.style.display = "none";
-    iframe.style.display = "block";
-    iframe.src = RUN_BASE + data.archive;
-    iframe.onload = () => onIframeLoad(data);
+    // Outgoing
+    const outEdges = outgoingByPage.get(data.id) || [];
+    document.getElementById("meta-out-count").textContent = outEdges.length;
+    document.getElementById("meta-out").innerHTML = renderEdgeList(outEdges, "target")
+      || `<li class="empty">no outgoing links</li>`;
+
+    // Incoming
+    const inEdges = incomingByPage.get(data.id) || [];
+    document.getElementById("meta-in-count").textContent = inEdges.length;
+    document.getElementById("meta-in").innerHTML = renderEdgeList(inEdges, "source")
+      || `<li class="empty">no incoming links</li>`;
+
+    // Wire link clicks to graph navigation
+    document.querySelectorAll("#tab-metadata .lnk[data-id]").forEach((el) => {
+      el.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        navigateToNode(el.dataset.id);
+      });
+    });
+  }
+
+  function renderEdgeList(edges, sideKey) {
+    if (!edges.length) return "";
+    const seen = new Set();
+    const items = [];
+    for (const e of edges) {
+      const otherId = e[sideKey];
+      if (seen.has(otherId)) continue;
+      seen.add(otherId);
+      const other = nodeById.get(otherId);
+      const label = other ? (other.label || other.url) : otherId;
+      const url = other ? other.url : "";
+      const badge = other ? badgeFor(other) : { cls: "unvisited", text: "?" };
+      const kindMeta = e.kind === "area" ? "[area]" : "[a]";
+      items.push(
+        `<li>` +
+        `<span class="badge ${badge.cls}">${badge.text}</span>` +
+        `<a class="lnk" data-id="${escapeHtml(otherId)}" href="#">${escapeHtml(truncate(label, 60))}</a>` +
+        `<span class="meta">${kindMeta} ${escapeHtml(truncate(url, 60))}</span>` +
+        `</li>`
+      );
+    }
+    return items.join("");
+  }
+
+  function navigateToNode(nodeId) {
+    if (!graph.hasNode(nodeId)) return;
+    const attrs = graph.getNodeAttributes(nodeId);
+    if (renderer) {
+      renderer.getCamera().animate(
+        { x: attrs.x, y: attrs.y, ratio: 0.2 },
+        { duration: 500 },
+      );
+    }
+    showNode(attrs._raw);
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   function onIframeLoad(nodeData) {

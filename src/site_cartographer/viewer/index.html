@@ -64,12 +64,64 @@
   #panel { display: flex; flex-direction: column; border-left: 1px solid #333; background: #1a1a1a; color: #eee; }
   #panel-header { padding: 8px 12px; background: #222; border-bottom: 1px solid #333; font-size: 13px; }
   #panel-header a { color: #6ab0ff; text-decoration: none; word-break: break-all; }
+  #panel-tabs { display: flex; background: #181818; border-bottom: 1px solid #333; }
+  #panel-tabs .tab {
+    flex: 1; padding: 8px 12px; background: transparent; color: #888;
+    border: 0; border-right: 1px solid #2a2a2a; cursor: pointer;
+    font-size: 12px; font-family: inherit;
+  }
+  #panel-tabs .tab:last-child { border-right: 0; }
+  #panel-tabs .tab.active { color: #6ab0ff; background: #1a1a1a; border-bottom: 2px solid #6ab0ff; }
+  #panel-tabs .tab:hover:not(.active) { color: #ccc; }
+  .tab-content { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  .tab-content.active { display: flex; }
   #panel-controls { padding: 6px 12px; background: #181818; border-bottom: 1px solid #333; font-size: 12px; }
   #panel-controls label { margin-right: 12px; }
   #frame-wrap { position: relative; flex: 1; overflow: hidden; background: #000; }
   #page-iframe { width: 100%; height: 100%; border: 0; background: #fff; }
   #empty-msg { padding: 16px; color: #777; }
   #stats { padding: 6px 12px; font-size: 11px; color: #888; border-top: 1px solid #333; }
+
+  /* Metadata tab */
+  #tab-metadata { padding: 0; overflow-y: auto; }
+  #tab-metadata .meta-block { padding: 12px; border-bottom: 1px solid #2a2a2a; }
+  #tab-metadata h3 {
+    margin: 0 0 8px 0; font-size: 11px; font-weight: 600;
+    color: #888; text-transform: uppercase; letter-spacing: 0.05em;
+  }
+  #tab-metadata dl { margin: 0; display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; font-size: 12px; }
+  #tab-metadata dt { color: #888; }
+  #tab-metadata dd { margin: 0; color: #ddd; word-break: break-all; }
+  #tab-metadata dd.url { color: #6ab0ff; }
+  #tab-metadata details { margin: 0; padding: 8px 12px; border-bottom: 1px solid #2a2a2a; }
+  #tab-metadata details summary {
+    cursor: pointer; font-size: 12px; color: #aaa; padding: 4px 0;
+    list-style: none; outline: 0; user-select: none;
+  }
+  #tab-metadata details summary::before {
+    content: "▸ "; color: #666; display: inline-block; width: 14px;
+  }
+  #tab-metadata details[open] summary::before { content: "▾ "; }
+  #tab-metadata summary .count { color: #6ab0ff; font-weight: 600; }
+  #tab-metadata details ul { margin: 6px 0 0 18px; padding: 0; list-style: none; max-height: 240px; overflow-y: auto; }
+  #tab-metadata details li {
+    padding: 3px 0; font-size: 11px; color: #bbb;
+    word-break: break-all;
+  }
+  #tab-metadata details li .lnk {
+    color: #6ab0ff; cursor: pointer; text-decoration: none;
+  }
+  #tab-metadata details li .lnk:hover { text-decoration: underline; }
+  #tab-metadata details li .meta { color: #666; font-size: 10px; margin-left: 6px; }
+  #tab-metadata .badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; background: #333; color: #aaa; margin-right: 4px;
+  }
+  #tab-metadata .badge.archived { background: #2a3a4f; color: #6ab0ff; }
+  #tab-metadata .badge.external { background: #4a3f2a; color: #d9b35f; }
+  #tab-metadata .badge.phantom { background: #4a2a2a; color: #d97a7a; }
+  #tab-metadata .badge.unvisited { background: #333; color: #888; }
+  #tab-metadata .empty { color: #666; font-style: italic; padding: 4px 18px; font-size: 11px; }
 </style>
 </head>
 <body>
@@ -141,13 +193,42 @@
 
   <div id="panel">
     <div id="panel-header"><span id="panel-title">site-cartographer</span></div>
-    <div id="panel-controls">
-      <label><input type="checkbox" id="toggle-highlights" checked> highlight links</label>
-      <a id="open-page" href="#" target="_blank" style="color:#6ab0ff;display:none;">open original URL</a>
+    <div id="panel-tabs">
+      <button class="tab active" data-tab="page">page</button>
+      <button class="tab" data-tab="metadata">metadata</button>
     </div>
-    <div id="frame-wrap">
-      <div id="empty-msg">click a node to view its page</div>
-      <iframe id="page-iframe" style="display:none;"></iframe>
+    <div id="tab-page" class="tab-content active">
+      <div id="panel-controls">
+        <label><input type="checkbox" id="toggle-highlights" checked> highlight links</label>
+        <a id="open-page" href="#" target="_blank" style="color:#6ab0ff;display:none;">open original URL</a>
+      </div>
+      <div id="frame-wrap">
+        <div id="empty-msg">click a node to view its page</div>
+        <iframe id="page-iframe" style="display:none;"></iframe>
+      </div>
+    </div>
+    <div id="tab-metadata" class="tab-content">
+      <div id="meta-empty" class="meta-block" style="color:#666;font-style:italic;">
+        click a node to see its metadata.
+      </div>
+      <div id="meta-body" style="display:none;">
+        <div class="meta-block">
+          <h3>identity</h3>
+          <dl id="meta-identity"></dl>
+        </div>
+        <details id="meta-aliases-wrap" style="display:none;" open>
+          <summary>aliases <span class="count" id="meta-aliases-count">0</span></summary>
+          <ul id="meta-aliases"></ul>
+        </details>
+        <details id="meta-out-wrap">
+          <summary>links out <span class="count" id="meta-out-count">0</span></summary>
+          <ul id="meta-out"></ul>
+        </details>
+        <details id="meta-in-wrap">
+          <summary>links in <span class="count" id="meta-in-count">0</span></summary>
+          <ul id="meta-in"></ul>
+        </details>
+      </div>
     </div>
     <div id="stats"></div>
   </div>
