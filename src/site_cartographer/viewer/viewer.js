@@ -25,6 +25,7 @@
   let graph = null;
   let highlightsOn = true;
   let thumbnailsOn = true;
+  let layoutInProgress = false;
   let outgoingByPage = new Map();
   let incomingByPage = new Map();
   let nodeById = new Map();
@@ -230,27 +231,40 @@
       console.warn("[layout] no scan name in URL, save skipped");
       return;
     }
+    const t0 = performance.now();
     const positions = {};
     graph.forEachNode((id, attrs) => {
       positions[id] = [Math.round(attrs.x * 100) / 100, Math.round(attrs.y * 100) / 100];
     });
-    setLayoutStatus("saving layout…");
+    const body = JSON.stringify({ params, positions });
+    const tBuild = performance.now() - t0;
+    setLayoutStatus(
+      `saving layout… (${(body.length / 1024).toFixed(1)} KB)`,
+    );
+    const tFetch = performance.now();
     try {
       const res = await fetch(`/api/scans/${encodeURIComponent(SCAN_NAME)}/layout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ params, positions }),
+        body: body,
       });
+      const tFetchDone = performance.now() - tFetch;
       if (!res.ok) {
-        const body = await res.text().catch(() => "");
-        const msg = `save failed: HTTP ${res.status} ${body.slice(0, 80)}`;
+        const errBody = await res.text().catch(() => "");
+        const msg = `save failed: HTTP ${res.status} ${errBody.slice(0, 80)}`;
         console.warn("[layout]", msg);
         setLayoutStatus(msg, "#d97a7a");
       } else {
         const data = await res.json();
         const ts = (data.saved_at || "").slice(11, 19);
-        console.log("[layout] saved", data);
-        setLayoutStatus(`layout saved at ${ts || "—"}`, "#5fd97a");
+        console.log(
+          `[layout] saved at ${ts}: payload=${(body.length / 1024).toFixed(1)}KB, ` +
+          `build=${tBuild.toFixed(0)}ms, fetch=${tFetchDone.toFixed(0)}ms`,
+        );
+        setLayoutStatus(
+          `saved (${(body.length / 1024).toFixed(1)}KB · ${tFetchDone.toFixed(0)}ms)`,
+          "#5fd97a",
+        );
       }
     } catch (e) {
       console.warn("[layout] save error:", e);
@@ -369,6 +383,7 @@
 
   function runLayout(params) {
     layoutAbort = false;
+    layoutInProgress = true;
     const runBtn = document.getElementById("layout-run");
     const stopBtn = document.getElementById("layout-stop");
     const prog = document.getElementById("layout-progress");
@@ -427,6 +442,7 @@
     const totalTicks = Math.max(50, Math.ceil(Math.log(alphaMin) / Math.log(1 - decay)));
     let ticked = 0;
 
+    let frameCounter = 0;
     function step() {
       if (layoutAbort) {
         finish();
@@ -437,10 +453,16 @@
         sim.tick();
         ticked++;
       }
-      // Push positions back into sigma graph
-      for (const n of nodes) {
-        graph.setNodeAttribute(n.id, "x", n.x);
-        graph.setNodeAttribute(n.id, "y", n.y);
+      // Push positions to sigma every 4 frames during the simulation —
+      // each setNodeAttribute fires sigma's render cycle, and at 1000+ nodes
+      // that gets expensive. Visual feedback every ~4 frames is smooth enough.
+      frameCounter++;
+      const settling = sim.alpha() <= alphaMin;
+      if (settling || frameCounter % 4 === 0) {
+        for (const n of nodes) {
+          graph.setNodeAttribute(n.id, "x", n.x);
+          graph.setNodeAttribute(n.id, "y", n.y);
+        }
       }
       progBar.style.width = Math.min(100, (ticked / totalTicks) * 100).toFixed(1) + "%";
       if (sim.alpha() > alphaMin) {
@@ -457,8 +479,17 @@
       setTimeout(() => { prog.style.display = "none"; }, 400);
       const loader = document.getElementById("cy-loading");
       if (loader) loader.style.display = "none";
+      // Always push the final positions before unblocking the overlay.
+      for (const n of nodes) {
+        graph.setNodeAttribute(n.id, "x", n.x);
+        graph.setNodeAttribute(n.id, "y", n.y);
+      }
+      layoutInProgress = false;
+      drawThumbnailOverlay();
       // Persist the result so re-opening the viewer skips the recompute.
-      saveLayout(params);
+      // Defer one frame so the browser can finish rendering before the
+      // fetch's response handling competes for the main thread.
+      requestAnimationFrame(() => saveLayout(params));
     }
 
     step();
@@ -526,7 +557,9 @@
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, overlay.width / dpr, overlay.height / dpr);
-    if (!thumbnailsOn) return;
+    // Skip the per-node thumbnail draw while layout is running — drawing
+    // 1000+ image clips on every sigma frame chokes the main thread.
+    if (!thumbnailsOn || layoutInProgress) return;
 
     graph.forEachNode((nodeId, attrs) => {
       const raw = attrs._raw;
