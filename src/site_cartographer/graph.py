@@ -31,23 +31,59 @@ def export_cytoscape_json(run_dir: Path, run_id: int | None = None) -> Path:
         nodes: list[dict] = []
         seen_ids: set[str] = set()
 
+        # Build a mapping from body_hash -> canonical archived page id, so
+        # we can mark duplicate-body pages (same content under a different URL)
+        # and point them at the page whose archive actually exists.
+        body_canonical: dict[str, tuple[str, str, str]] = {}
         for row in conn.execute(
-            "SELECT url_canonical, title, thumb_path, archive_path,"
+            "SELECT body_hash, url_canonical, archive_path, thumb_path"
+            " FROM pages WHERE run_id = ? AND archive_path IS NOT NULL"
+            " AND body_hash IS NOT NULL",
+            (run_id,),
+        ):
+            # First archived page per body_hash wins.
+            if row["body_hash"] not in body_canonical:
+                body_canonical[row["body_hash"]] = (
+                    page_key(row["url_canonical"]),
+                    _to_url_path(row["archive_path"]),
+                    _to_url_path(row["thumb_path"]),
+                )
+
+        for row in conn.execute(
+            "SELECT url_canonical, title, thumb_path, archive_path, body_hash,"
             " is_external, is_phantom_404, http_status, depth"
             " FROM pages WHERE run_id = ?",
             (run_id,),
         ):
             node_id = page_key(row["url_canonical"])
             seen_ids.add(node_id)
+
+            archive = _to_url_path(row["archive_path"])
+            thumb = _to_url_path(row["thumb_path"])
+            is_duplicate = False
+            duplicate_of: str | None = None
+            if archive is None and row["body_hash"] in body_canonical:
+                # Body matches an archived page — point this node at it
+                # instead of leaving the panel blank.
+                canon_id, canon_archive, canon_thumb = body_canonical[row["body_hash"]]
+                if canon_id != node_id:
+                    is_duplicate = True
+                    duplicate_of = canon_id
+                    archive = canon_archive
+                    if thumb is None:
+                        thumb = canon_thumb
+
             nodes.append({
                 "data": {
                     "id": node_id,
                     "url": row["url_canonical"],
                     "label": row["title"] or row["url_canonical"],
-                    "thumb": _to_url_path(row["thumb_path"]),
-                    "archive": _to_url_path(row["archive_path"]),
+                    "thumb": thumb,
+                    "archive": archive,
                     "is_external": bool(row["is_external"]),
                     "is_phantom_404": bool(row["is_phantom_404"]),
+                    "is_duplicate": is_duplicate,
+                    "duplicate_of": duplicate_of,
                     "http_status": row["http_status"],
                     "depth": row["depth"],
                 }

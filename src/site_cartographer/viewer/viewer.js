@@ -27,6 +27,21 @@
       ...graph.edges,
     ];
 
+    // Pick a layout based on graph size. cose looks great but is O(n²) per
+    // iteration — too slow for >300 nodes. concentric grouped by depth is
+    // near-instant and still readable for large graphs.
+    const nodeCount = graph.nodes.length;
+    const layoutSpec = nodeCount > 300
+      ? {
+          name: "concentric",
+          concentric: (n) => -(n.data("depth") ?? 99),
+          levelWidth: () => 1,
+          minNodeSpacing: 25,
+          animate: false,
+          padding: 30,
+        }
+      : { name: "cose", animate: false, nodeRepulsion: 8000, idealEdgeLength: 100 };
+
     try {
       cy = cytoscape({
         container: document.getElementById("cy"),
@@ -70,6 +85,10 @@
             style: { "background-color": "#522", "border-color": "#a66" },
           },
           {
+            selector: "node[?is_duplicate]",
+            style: { "border-color": "#88a", "border-style": "dashed", "opacity": 0.7 },
+          },
+          {
             selector: "edge",
             style: {
               "curve-style": "bezier",
@@ -85,7 +104,7 @@
             style: { "line-color": "#664", "target-arrow-color": "#664" },
           },
         ],
-        layout: { name: "cose", animate: false, nodeRepulsion: 8000, idealEdgeLength: 100 },
+        layout: layoutSpec,
         wheelSensitivity: 0.2,
       });
     } catch (err) {
@@ -94,6 +113,15 @@
     }
 
     cy.on("tap", "node", (evt) => showNode(evt.target.data()));
+
+    // Hide the loading overlay once layoutstop fires (or immediately for
+    // layouts that don't animate).
+    const hideLoader = () => {
+      const el = document.getElementById("cy-loading");
+      if (el) el.style.display = "none";
+    };
+    cy.one("layoutstop", hideLoader);
+    setTimeout(hideLoader, 100); // belt and braces for synchronous layouts
 
     document.getElementById("stats").textContent =
       graph.nodes.length + " nodes · " + graph.edges.length + " edges";
@@ -158,6 +186,13 @@
       }
       empty.textContent = msg;
       return;
+    }
+
+    if (data.is_duplicate) {
+      // Same body as another URL — show that URL's archive transparently,
+      // but tell the user what's going on.
+      document.getElementById("panel-title").textContent =
+        (data.label || data.url) + "  (alias of already-archived page)";
     }
 
     empty.style.display = "none";
