@@ -110,6 +110,23 @@
           <span class="val" id="val-decay">0.022</span>
         </div>
         <div class="row">
+          <label>cluster pull</label>
+          <input type="range" id="param-cluster" min="0" max="100" value="40" step="1" />
+          <span class="val" id="val-cluster">0.40</span>
+        </div>
+        <div class="row">
+          <label>hub softening</label>
+          <input type="range" id="param-hub-soften" min="0" max="100" value="80" step="1" />
+          <span class="val" id="val-hub-soften">80%</span>
+        </div>
+        <div class="row">
+          <label>color by</label>
+          <select id="param-color-by" style="flex:1;background:#222;color:#ddd;border:1px solid #444;font-size:11px;">
+            <option value="type">type (archived/external/…)</option>
+            <option value="community" selected>community</option>
+          </select>
+        </div>
+        <div class="row">
           <label>show thumbnails</label>
           <input type="checkbox" id="param-thumbnails" checked style="flex:0 0 auto;" />
         </div>

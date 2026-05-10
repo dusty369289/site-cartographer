@@ -28,6 +28,7 @@
   let edgesByPage = new Map();
   let layoutAbort = false;
   const imageCache = new Map();
+  const communityColors = new Map();
 
   fetch(RUN_BASE + "graph.json")
     .then((r) => {
@@ -92,6 +93,10 @@
       graph.setNodeAttribute(n, "size", 3 + 14 * norm);
     });
 
+    // Detect communities via label propagation, then color the graph.
+    detectCommunities(graph);
+    applyColors();
+
     renderer = new Sigma(graph, document.getElementById("cy"), {
       renderLabels: true,
       labelDensity: 0.07,
@@ -127,6 +132,71 @@
     runLayout(readParams());
   }
 
+  // ------------------------------------------------------------- communities
+  function detectCommunities(g, iterations = 12) {
+    // Label propagation: each node starts in its own community, then
+    // repeatedly adopts the most common community among its neighbours.
+    // Cheap (O(n × iter × avg_degree)) and good enough for visual clustering.
+    const community = new Map();
+    g.forEachNode((n) => community.set(n, n));
+    const ids = g.nodes();
+    for (let iter = 0; iter < iterations; iter++) {
+      let changed = false;
+      // Random visit order to break symmetry on each pass.
+      for (let i = ids.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [ids[i], ids[j]] = [ids[j], ids[i]];
+      }
+      for (const n of ids) {
+        const counts = new Map();
+        g.forEachNeighbor(n, (nbr) => {
+          const c = community.get(nbr);
+          counts.set(c, (counts.get(c) || 0) + 1);
+        });
+        if (counts.size === 0) continue;
+        let bestC = community.get(n);
+        let bestN = -1;
+        for (const [c, k] of counts) {
+          if (k > bestN || (k === bestN && Math.random() < 0.5)) {
+            bestN = k; bestC = c;
+          }
+        }
+        if (bestC !== community.get(n)) {
+          community.set(n, bestC);
+          changed = true;
+        }
+      }
+      if (!changed) break;
+    }
+    g.forEachNode((n) => g.setNodeAttribute(n, "community", community.get(n)));
+  }
+
+  function communityColor(c) {
+    if (communityColors.has(c)) return communityColors.get(c);
+    // Hash the community id to a hue, generate a pastel-saturated colour.
+    let h = 0;
+    const s = String(c);
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    const hue = ((h >>> 0) % 360);
+    const col = `hsl(${hue},65%,60%)`;
+    communityColors.set(c, col);
+    return col;
+  }
+
+  function applyColors() {
+    const mode = (document.getElementById("param-color-by") || {}).value || "type";
+    graph.forEachNode((n, attrs) => {
+      let color;
+      if (mode === "community") {
+        color = communityColor(attrs.community);
+      } else {
+        color = pickColor(attrs._raw);
+      }
+      graph.setNodeAttribute(n, "color", color);
+    });
+    if (renderer) renderer.refresh();
+  }
+
   // -------------------------------------------------------------------- layout
   function readParams() {
     return {
@@ -135,6 +205,8 @@
       collide: +document.getElementById("param-collide").value,
       centerStrength: (+document.getElementById("param-center").value) / 100,
       alphaDecay: (+document.getElementById("param-decay").value) / 1000,
+      clusterStrength: (+document.getElementById("param-cluster").value) / 100,
+      hubSoften: (+document.getElementById("param-hub-soften").value) / 100,
     };
   }
 
@@ -145,6 +217,8 @@
       ["param-collide", "val-collide", (v) => v],
       ["param-center", "val-center", (v) => (v / 100).toFixed(2)],
       ["param-decay", "val-decay", (v) => (v / 1000).toFixed(3)],
+      ["param-cluster", "val-cluster", (v) => (v / 100).toFixed(2)],
+      ["param-hub-soften", "val-hub-soften", (v) => v + "%"],
     ];
     for (const [iid, oid, fmt] of ids) {
       const inp = document.getElementById(iid);
@@ -161,6 +235,9 @@
     document.getElementById("param-thumbnails").addEventListener("change", (e) => {
       thumbnailsOn = e.target.checked;
       drawThumbnailOverlay();
+    });
+    document.getElementById("param-color-by").addEventListener("change", () => {
+      applyColors();
     });
   }
 
@@ -186,11 +263,35 @@
       links.push({ source: src, target: tgt });
     });
 
+    // Hub-softened link strength: high-degree nodes attract their neighbours
+    // less hard, so leaves are free to cluster around shared connections
+    // instead of arranging in a dense ring around their hub.
+    const linkForce = d3.forceLink(links)
+      .id((d) => d.id)
+      .distance(params.linkDistance);
+    if (params.hubSoften > 0) {
+      linkForce.strength((link) => {
+        const ds = graph.degree(link.source.id || link.source);
+        const dt = graph.degree(link.target.id || link.target);
+        const denom = Math.max(ds, dt);
+        const softened = 1 / Math.max(1, denom);
+        // Blend between d3 default (1/min) and softened (1/max) by hubSoften
+        const dflt = 1 / Math.max(1, Math.min(ds, dt));
+        return dflt * (1 - params.hubSoften) + softened * params.hubSoften;
+      });
+    } else {
+      linkForce.strength(0.6);
+    }
+
+    // Cluster force: pulls nodes toward the centroid of their community.
+    const clusterForce = makeClusterForce(nodes, params.clusterStrength);
+
     const sim = d3.forceSimulation(nodes)
-      .force("link", d3.forceLink(links).id((d) => d.id).distance(params.linkDistance).strength(0.6))
+      .force("link", linkForce)
       .force("charge", d3.forceManyBody().strength(params.charge).distanceMax(800))
       .force("center", d3.forceCenter(0, 0).strength(params.centerStrength))
       .force("collide", d3.forceCollide(params.collide))
+      .force("cluster", clusterForce)
       .alphaDecay(params.alphaDecay)
       .alpha(1)
       .stop();
@@ -233,6 +334,33 @@
     }
 
     step();
+  }
+
+  function makeClusterForce(nodes, strength) {
+    // Each tick: compute centroid per community, pull each node toward its
+    // centroid by `strength`. Implemented as a d3 custom force (a function
+    // of alpha that mutates node.vx, node.vy).
+    if (strength <= 0) return () => {};
+    const byCommunity = new Map();
+    for (const n of nodes) {
+      const c = graph.getNodeAttribute(n.id, "community");
+      n._community = c;
+      if (!byCommunity.has(c)) byCommunity.set(c, []);
+      byCommunity.get(c).push(n);
+    }
+    return function (alpha) {
+      const k = strength * alpha;
+      for (const [, group] of byCommunity) {
+        if (group.length < 2) continue;
+        let cx = 0, cy = 0;
+        for (const n of group) { cx += n.x; cy += n.y; }
+        cx /= group.length; cy /= group.length;
+        for (const n of group) {
+          n.vx += (cx - n.x) * k;
+          n.vy += (cy - n.y) * k;
+        }
+      }
+    };
   }
 
   // -------------------------------------------------------------- thumbnails
