@@ -1,10 +1,28 @@
-// site-cartographer viewer
-// Loads graph.json, renders Cytoscape graph, opens MHTML in iframe on node click,
-// highlights clickable elements (a, area) by injecting CSS / canvas overlay.
+// site-cartographer viewer (Sigma.js + Graphology)
+// Loads graph.json with baked ForceAtlas2 positions, renders via WebGL,
+// shows clusters Obsidian-style. Click a node -> side panel loads the saved
+// HTML archive in an iframe and highlights clickable elements.
 
 (function () {
-  const RUN_BASE = "../"; // graph.json, pages/, thumbs/ live one level up from viewer/
-  let cy;
+  const RUN_BASE = "../";
+  const Graph = (window.graphology && window.graphology.Graph)
+    || (window.graphology && window.graphology.default && window.graphology.default.Graph);
+  if (!Graph) {
+    document.getElementById("panel-title").textContent =
+      "viewer error: graphology not loaded";
+    return;
+  }
+
+  const COLORS = {
+    archived: "#6ab0ff",       // blue — internal page that was archived
+    canonical: "#5fd97a",      // green — archived page that has aliases
+    external: "#d9b35f",       // amber — external link
+    phantom: "#d97a7a",        // red — phantom 404
+    unvisited: "#666666",      // grey — referenced but not crawled
+  };
+
+  let renderer = null;
+  let graph = null;
   let highlightsOn = true;
   let edgesByPage = new Map();
 
@@ -15,151 +33,102 @@
     })
     .then(initGraph)
     .catch((err) => {
-      document.getElementById("panel-title").textContent = "viewer error: " + err.message;
+      document.getElementById("panel-title").textContent =
+        "viewer error: " + err.message;
       console.error(err);
     });
 
-  function initGraph(graph) {
-    indexEdgesByPage(graph);
+  function pickColor(d) {
+    if (d.is_phantom_404) return COLORS.phantom;
+    if (d.is_external) return COLORS.external;
+    if (d.is_unvisited) return COLORS.unvisited;
+    if (d.alias_count) return COLORS.canonical;
+    if (d.archive) return COLORS.archived;
+    return COLORS.unvisited;
+  }
 
-    const elements = [
-      ...graph.nodes.map(toNode),
-      ...graph.edges,
-    ];
+  function initGraph(data) {
+    graph = new Graph({ multi: false, type: "undirected" });
 
-    // cose (force-directed) is the default — readable and shows clusters well.
-    // For very large graphs we shrink the iteration count so initial render
-    // stays under a few seconds; the user can click "re-layout" for a high
-    // quality pass anytime.
-    const nodeCount = graph.nodes.length;
-    const fastIter = nodeCount > 1500 ? 50 : nodeCount > 800 ? 150 : nodeCount > 300 ? 400 : 1000;
-    const layoutSpec = {
-      name: "cose",
-      animate: false,
-      randomize: true,
-      numIter: fastIter,
-      nodeRepulsion: () => 8000,
-      idealEdgeLength: () => 80,
-      gravity: 0.25,
-      nestingFactor: 1.2,
-      componentSpacing: 60,
-    };
+    // Index edges by source for the side-panel highlight metadata.
+    edgesByPage = new Map();
+    for (const e of data.edges) {
+      if (!edgesByPage.has(e.source)) edgesByPage.set(e.source, []);
+      edgesByPage.get(e.source).push(e);
+    }
 
-    try {
-      cy = cytoscape({
-        container: document.getElementById("cy"),
-        elements: elements,
-        style: [
-          {
-            selector: "node",
-            style: {
-              "background-color": "#444",
-              "background-fit": "cover",
-              "background-opacity": 1,
-              width: 60,
-              height: 45,
-              label: "data(short_label)",
-              color: "#ddd",
-              "font-size": 8,
-              "text-valign": "bottom",
-              "text-margin-y": 4,
-              "text-wrap": "ellipsis",
-              "text-max-width": "70px",
-              "border-width": 1,
-              "border-color": "#666",
-            },
-          },
-          {
-            selector: "node[thumb_url]",
-            style: {
-              "background-image": "data(thumb_url)",
-            },
-          },
-          {
-            selector: "node[?is_external]",
-            style: { "background-color": "#552", "border-color": "#aa6", "shape": "diamond" },
-          },
-          {
-            selector: "node[?is_unvisited]",
-            style: { "background-color": "#333", "border-color": "#555", "border-style": "dashed" },
-          },
-          {
-            selector: "node[?is_phantom_404]",
-            style: { "background-color": "#522", "border-color": "#a66" },
-          },
-          {
-            selector: "node[alias_count >= 1]",
-            style: { "border-color": "#6c6", "border-width": 2 },
-          },
-          {
-            selector: "edge",
-            style: {
-              "curve-style": "bezier",
-              "target-arrow-shape": "triangle",
-              "line-color": "#444",
-              "target-arrow-color": "#444",
-              width: 1,
-              "arrow-scale": 0.6,
-            },
-          },
-          {
-            selector: "edge[kind = 'area']",
-            style: { "line-color": "#664", "target-arrow-color": "#664" },
-          },
-        ],
-        layout: layoutSpec,
-        wheelSensitivity: 0.2,
+    for (const n of data.nodes) {
+      graph.addNode(n.id, {
+        x: n.x ?? 0,
+        y: n.y ?? 0,
+        size: 4,
+        label: shortLabel(n),
+        color: pickColor(n),
+        // stash the original record for click handlers / panel
+        _raw: n,
       });
-    } catch (err) {
-      console.error("cytoscape init failed", err);
-      throw err;
+    }
+    for (const e of data.edges) {
+      if (graph.hasEdge(e.source, e.target)) continue;
+      if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) continue;
+      graph.addEdge(e.source, e.target, {
+        size: 0.5,
+        color: e.kind === "area" ? "#404030" : "#2a2a2a",
+        _raw: e,
+      });
     }
 
-    cy.on("tap", "node", (evt) => showNode(evt.target.data()));
+    // Size nodes by degree so hubs pop visually.
+    let maxDeg = 1;
+    graph.forEachNode((n) => { maxDeg = Math.max(maxDeg, graph.degree(n)); });
+    graph.forEachNode((n) => {
+      const d = graph.degree(n);
+      const norm = Math.sqrt(d / maxDeg);
+      graph.setNodeAttribute(n, "size", 3 + 12 * norm);
+    });
 
-    // Hide the loading overlay once layoutstop fires (or immediately for
-    // layouts that don't animate).
-    const hideLoader = () => {
-      const el = document.getElementById("cy-loading");
-      if (el) el.style.display = "none";
-    };
-    cy.one("layoutstop", hideLoader);
-    setTimeout(hideLoader, 100); // belt and braces for synchronous layouts
+    renderer = new Sigma(graph, document.getElementById("cy"), {
+      renderLabels: true,
+      labelDensity: 0.07,
+      labelGridCellSize: 60,
+      labelRenderedSizeThreshold: 8,
+      defaultEdgeColor: "#2a2a2a",
+      minCameraRatio: 0.05,
+      maxCameraRatio: 20,
+      labelColor: { color: "#ddd" },
+      labelFont: "system-ui, sans-serif",
+      labelSize: 11,
+    });
 
+    renderer.on("clickNode", ({ node }) => {
+      const raw = graph.getNodeAttribute(node, "_raw");
+      showNode(raw);
+    });
+
+    renderer.on("enterNode", ({ node }) => {
+      document.getElementById("cy").style.cursor = "pointer";
+    });
+    renderer.on("leaveNode", () => {
+      document.getElementById("cy").style.cursor = "default";
+    });
+
+    document.getElementById("cy-loading").style.display = "none";
     document.getElementById("stats").textContent =
-      graph.nodes.length + " nodes · " + graph.edges.length + " edges";
+      data.nodes.length + " nodes · " + data.edges.length + " edges";
   }
 
-  function indexEdgesByPage(graph) {
-    for (const e of graph.edges) {
-      const src = e.data.source;
-      if (!edgesByPage.has(src)) edgesByPage.set(src, []);
-      edgesByPage.get(src).push(e.data);
-    }
-  }
-
-  function toNode(n) {
-    const d = n.data;
-    const data = { ...d, short_label: shortLabel(d) };
-    // Only set thumb_url when a thumbnail exists; the style selector
-    // [thumb_url] then keys off attribute presence, so unvisited/external
-    // nodes never trigger the background-image URL parser.
-    if (d.thumb) data.thumb_url = RUN_BASE + d.thumb;
-    return { data: data };
-  }
-
-  function shortLabel(d) {
-    if (d.label && d.label.length > 0 && d.label !== d.url) return truncate(d.label, 30);
+  function shortLabel(n) {
+    if (n.label && n.label !== n.url) return truncate(n.label, 40);
     try {
-      const u = new URL(d.url);
-      return truncate(u.pathname || "/", 30);
+      const u = new URL(n.url);
+      return truncate(u.pathname || "/", 40);
     } catch (e) {
-      return truncate(d.url, 30);
+      return truncate(n.url, 40);
     }
   }
 
-  function truncate(s, n) {
-    return s.length > n ? s.slice(0, n - 1) + "…" : s;
+  function truncate(s, k) {
+    return s.length > k ? s.slice(0, k - 1) + "…" : s;
   }
 
   function showNode(data) {
@@ -219,7 +188,6 @@
   }
 
   function injectHighlights(doc, nodeData) {
-    // Style <a> tags with a visible outline.
     const style = doc.createElement("style");
     style.id = "site-cart-highlights";
     style.textContent =
@@ -227,9 +195,6 @@
       " outline-offset: 1px; }";
     doc.head && doc.head.appendChild(style);
 
-    // For each <img usemap>, draw poly/rect/circle overlays on a canvas
-    // sized to the image, using the area coords from the original HTML
-    // (preserved in the MHTML).
     const imgs = doc.querySelectorAll("img[usemap]");
     imgs.forEach((img) => overlayAreas(doc, img));
   }
@@ -260,9 +225,6 @@
         canvas.style.height = img.clientHeight + "px";
         canvas.width = w;
         canvas.height = h;
-        if (img.parentNode.style.position === "" || img.parentNode.style.position === "static") {
-          // best-effort: anchor against the body if the parent is not positioned
-        }
         img.insertAdjacentElement("afterend", canvas);
       }
       const ctx = canvas.getContext("2d");
@@ -317,26 +279,6 @@
     if (window.CSS && CSS.escape) return CSS.escape(s);
     return s.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
   }
-
-  document.getElementById("relayout-btn").addEventListener("click", () => {
-    if (!cy) return;
-    const btn = document.getElementById("relayout-btn");
-    btn.disabled = true;
-    btn.textContent = "running cose…";
-    setTimeout(() => {
-      cy.layout({
-        name: "cose",
-        animate: false,
-        randomize: false,
-        numIter: 2000,
-        nodeRepulsion: () => 10000,
-        idealEdgeLength: () => 80,
-        gravity: 0.2,
-      }).run();
-      btn.disabled = false;
-      btn.textContent = "re-layout (high quality)";
-    }, 50);
-  });
 
   document.getElementById("toggle-highlights").addEventListener("change", (e) => {
     highlightsOn = e.target.checked;
