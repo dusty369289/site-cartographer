@@ -680,11 +680,10 @@ async def _bfs_worker(
         if claimed is None:
             # Queue is empty — but other workers may still be mid-fetch and
             # will enqueue new URLs. Only quit when everyone is idle too.
+            # Note: a drained queue is the natural end-state, not a halt;
+            # we leave halt_reason as None so the run is recorded as
+            # finished cleanly rather than "halted because we ran out".
             if state.in_flight == 0:
-                if state.halt_reason is None:
-                    state.halt_reason = "queue drained"
-                    logger.info(state.halt_reason)
-                    progress.on_halt(state.halt_reason)
                 state.stop = True
                 return
             await asyncio.sleep(0.1)

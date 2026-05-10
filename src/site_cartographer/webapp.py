@@ -182,6 +182,8 @@ async def _run_scan(ctx: ScanContext, reporter: WebProgressReporter) -> None:
     try:
         await crawl(ctx.config, progress=reporter)
     except (asyncio.CancelledError, KeyboardInterrupt):
+        # The crawler already records halt_reason="interrupted by user" in
+        # the DB; we only need to surface the event here.
         reporter._emit("halt", reason="interrupted by user")
     except Exception as e:
         ctx.error = str(e)
