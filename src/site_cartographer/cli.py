@@ -82,6 +82,12 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
         help="honour the target's /robots.txt disallow rules (off by default)",
     )
     p.add_argument(
+        "--no-archive", action="store_true",
+        help="metadata-only mode: skip writing inline HTML + thumbnails. "
+             "the graph + link metadata still get recorded, but you can't "
+             "view pages offline. useful for low-disk scans of huge sites",
+    )
+    p.add_argument(
         "--external-policy",
         choices=("ignore", "metadata", "archive", "crawl"),
         default="metadata",
@@ -199,6 +205,7 @@ def _cmd_scan(args: argparse.Namespace) -> int:
         scope_value=args.scope_value,
         respect_robots=args.respect_robots,
         external_policy=args.external_policy,
+        archive_pages=not args.no_archive,
         link_extractors=_parse_extractors(args.link_extractors),
         custom_link_regex=args.link_regex,
         user_agent=args.user_agent,

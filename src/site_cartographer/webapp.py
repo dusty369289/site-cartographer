@@ -158,6 +158,7 @@ def _build_config_from_payload(
         scope_value=payload.get("scope_value", "") or "",
         respect_robots=bool(payload.get("respect_robots", False)),
         external_policy=payload.get("external_policy", "metadata"),
+        archive_pages=bool(payload.get("archive_pages", True)),
         link_extractors=tuple(extractors),
         custom_link_regex=payload.get("custom_link_regex") or None,
         viewport=tuple(payload.get("viewport", [320, 240])),

@@ -133,6 +133,7 @@ async function showForm(name) {
       include_subdomains: !!cfg.include_subdomains,
       respect_robots: !!cfg.respect_robots,
       external_policy: cfg.external_policy || "metadata",
+      archive_pages: cfg.archive_pages !== false,
     };
     const errBox = document.getElementById("form-error");
     errBox.style.display = "none";

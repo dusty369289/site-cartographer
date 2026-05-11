@@ -59,3 +59,19 @@ def test_crawl_config_rejects_unknown_external_policy(tmp_path):
             output_dir=tmp_path,
             external_policy="bogus",
         )
+
+
+def test_crawl_config_archive_pages_defaults_true(tmp_path):
+    cfg = CrawlConfig(start_url="https://example.com/", output_dir=tmp_path)
+    assert cfg.archive_pages is True
+
+
+def test_crawl_config_archive_pages_can_be_disabled(tmp_path):
+    cfg = CrawlConfig(
+        start_url="https://example.com/",
+        output_dir=tmp_path,
+        archive_pages=False,
+    )
+    assert cfg.archive_pages is False
+    # And it round-trips through to_json_dict so a resume can read it back.
+    assert cfg.to_json_dict()["archive_pages"] is False

@@ -199,6 +199,11 @@ def _interactive_scan(output_root: Path) -> None:
             "honour the site's /robots.txt disallow rules?",
             default=False, style=s,
         ),
+        metadata_only=questionary.confirm(
+            "metadata-only mode? — skip writing page archives + thumbnails"
+            " (low disk; you keep the graph but can't view pages offline)",
+            default=False, style=s,
+        ),
         headed=questionary.confirm(
             "show the browser window while crawling (slower; useful for debug)?",
             default=False, style=s,
@@ -234,6 +239,7 @@ def _interactive_scan(output_root: Path) -> None:
         include_subdomains=answers["include_subdomains"],
         respect_robots=answers["respect_robots"],
         external_policy=answers["external_policy"],
+        archive_pages=not answers["metadata_only"],
         headless=not answers["headed"],
     )
 
@@ -433,6 +439,7 @@ def _interactive_resume(output_root: Path) -> None:
         include_subdomains=bool(existing.get("include_subdomains")),
         respect_robots=bool(existing.get("respect_robots")),
         external_policy=existing.get("external_policy") or "metadata",
+        archive_pages=existing.get("archive_pages", True) is not False,
         user_agent=existing.get("user_agent") or f"site-cartographer/{__version__}",
         viewport=tuple(existing.get("viewport") or [320, 240]),
         headless=True,

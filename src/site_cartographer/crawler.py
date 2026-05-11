@@ -135,6 +135,7 @@ class CrawlConfig:
     scope_value: str = ""
     respect_robots: bool = False
     external_policy: str = "metadata"
+    archive_pages: bool = True  # False = metadata-only, no inline HTML or thumbnails written
     link_extractors: tuple[str, ...] = DEFAULT_EXTRACTORS
     custom_link_regex: str | None = None
     user_agent: str = "site-cartographer/0.1 (+contact)"
@@ -527,19 +528,21 @@ async def _fetch_external(
         final_url = ph.page.url
         status = ph.response.status if ph.response is not None else None
 
-        a_path = archive_path(config.output_dir, url)
-        t_path = thumb_path(config.output_dir, url)
-        try:
-            await ph.save_thumbnail(t_path)
-        except Exception as e:
-            logger.warning("ext thumbnail failed for %s: %s", url, e)
-        try:
-            await ph.save_inline_html(a_path)
-        except Exception as e:
-            logger.warning("ext archive failed for %s: %s", url, e)
-
-        rel_a = a_path.relative_to(config.output_dir).as_posix() if a_path.exists() else None
-        rel_t = t_path.relative_to(config.output_dir).as_posix() if t_path.exists() else None
+        rel_a: str | None = None
+        rel_t: str | None = None
+        if config.archive_pages:
+            a_path = archive_path(config.output_dir, url)
+            t_path = thumb_path(config.output_dir, url)
+            try:
+                await ph.save_thumbnail(t_path)
+            except Exception as e:
+                logger.warning("ext thumbnail failed for %s: %s", url, e)
+            try:
+                await ph.save_inline_html(a_path)
+            except Exception as e:
+                logger.warning("ext archive failed for %s: %s", url, e)
+            rel_a = a_path.relative_to(config.output_dir).as_posix() if a_path.exists() else None
+            rel_t = t_path.relative_to(config.output_dir).as_posix() if t_path.exists() else None
         conn.execute(
             "UPDATE pages SET title = ?, http_status = ?, archive_path = ?,"
             " thumb_path = ?, fetched_at = ? WHERE id = ?",
@@ -822,23 +825,24 @@ async def _fetch_one(
             logger.debug("duplicate body, skipping link extraction: %s", url)
             return ("duplicate", status, title)
 
-        a_path = archive_path(config.output_dir, url)
-        t_path = thumb_path(config.output_dir, url)
-        try:
-            await ph.save_thumbnail(t_path)
-        except Exception as e:
-            logger.warning("thumbnail failed for %s: %s", url, e)
-        try:
-            await ph.save_inline_html(a_path)
-        except Exception as e:
-            logger.warning("archive failed for %s: %s", url, e)
+        if config.archive_pages:
+            a_path = archive_path(config.output_dir, url)
+            t_path = thumb_path(config.output_dir, url)
+            try:
+                await ph.save_thumbnail(t_path)
+            except Exception as e:
+                logger.warning("thumbnail failed for %s: %s", url, e)
+            try:
+                await ph.save_inline_html(a_path)
+            except Exception as e:
+                logger.warning("archive failed for %s: %s", url, e)
 
-        rel_a = a_path.relative_to(config.output_dir).as_posix() if a_path.exists() else None
-        rel_t = t_path.relative_to(config.output_dir).as_posix() if t_path.exists() else None
-        conn.execute(
-            "UPDATE pages SET archive_path = ?, thumb_path = ? WHERE id = ?",
-            (rel_a, rel_t, page_id),
-        )
+            rel_a = a_path.relative_to(config.output_dir).as_posix() if a_path.exists() else None
+            rel_t = t_path.relative_to(config.output_dir).as_posix() if t_path.exists() else None
+            conn.execute(
+                "UPDATE pages SET archive_path = ?, thumb_path = ? WHERE id = ?",
+                (rel_a, rel_t, page_id),
+            )
 
         for link in extract_links(
             html, base_url=final_url,

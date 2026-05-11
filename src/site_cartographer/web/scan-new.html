@@ -120,6 +120,11 @@
       <label for="respect_robots">honour the site's robots.txt disallow rules</label>
     </div>
 
+    <div class="checkbox-row">
+      <input type="checkbox" id="metadata_only" name="metadata_only" />
+      <label for="metadata_only">metadata-only mode — skip writing page archives + thumbnails (low disk usage; you keep the graph but can't view pages offline)</label>
+    </div>
+
     <div class="actions">
       <button type="submit" class="primary">start scan</button>
       <a class="btn" href="/">cancel</a>
@@ -168,6 +173,7 @@ form.addEventListener("submit", async (ev) => {
   payload.scope_mode = scopeMode;
   payload.scope_value = scopeValue;
   payload.respect_robots = !!fd.get("respect_robots");
+  payload.archive_pages = !fd.get("metadata_only");
 
   // Collect chosen extractors as a list.
   const extractors = [];
